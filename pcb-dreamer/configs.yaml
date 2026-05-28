@@ -21,9 +21,9 @@ defaults:
   size: [64, 64]
   envs: 1
   action_repeat: 1
-  time_limit: 8
+  time_limit: 25
   grayscale: False
-  prefill: 2500
+  prefill: 5000
   reward_EMA: True
   dyn_hidden: 512
   dyn_deter: 512
@@ -66,7 +66,7 @@ defaults:
   opt: 'adam'
   discount: 0.997
   discount_lambda: 0.95
-  imag_horizon: 15
+  imag_horizon: 25
   imag_gradient: 'reinforce'
   imag_gradient_mix: 0.0
   eval_state_mean: False

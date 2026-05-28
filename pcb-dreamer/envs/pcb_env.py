@@ -208,11 +208,11 @@ class TPPlacementEnv(gym.Env):
         if finite:
             diag = np.hypot(self.board.width, self.board.height)
             # Minimize total length
-            reward -= 3.0 * sum(finite) / (len(finite) * diag)
+            reward -= 5.0 * sum(finite) / (len(finite) * diag)
             # Length matching
             if len(finite) > 1:
                 spread = (max(finite) - min(finite)) / max(np.mean(finite), 1e-6)
-                reward -= 5.0 * spread
+                reward -= 20.0 * spread
 
         # TP spacing quality
         if len(self.placed_tps) > 1:

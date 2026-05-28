@@ -100,7 +100,7 @@ def main():
     print("Creating environments...")
     train_envs = [Damy(make_env("train", i, config.seed, args.num_traces))
                   for i in range(config.envs)]
-    eval_envs = [Damy(make_env("eval", i, config.seed + 100, args.num_traces))
+    eval_envs = [Damy(make_env("eval", i, config.seed, args.num_traces))
                  for i in range(config.envs)]
 
     acts = train_envs[0].action_space

@@ -134,8 +134,8 @@ def load_te_example(num_traces: int = 10, seed: int = None) -> BoardSpec:
     non-routing zone at TRACE_MIN_CENTER_TO_CENTER spacing.
 
     Args:
-        num_traces: how many traces to include (1–10). Top row first,
-                    then bottom row.
+        num_traces: how many traces to include (1–20). Far-top row first,
+                    then near-top, near-bottom, far-bottom.
         seed:       if provided, the connector cluster (NRZ, obstacles,
                     starting traces) is shifted to a random position on
                     the board, giving each seed a different layout while
@@ -223,14 +223,14 @@ def load_te_example(num_traces: int = 10, seed: int = None) -> BoardSpec:
     board.connector_h = _orig_conn_h
 
     # ------------------------------------------------------------------
-    # Starting points — 5 per row, centered within the non-routing zone
+    # Starting points — 10 per row, centered within the non-routing zone
     # ------------------------------------------------------------------
     # NRZ center x = nrz_x + nrz_w/2
     nrz_cx = nrz_x + nrz_w / 2
-    n_per_row = 5
+    n_per_row = 10
     min_sp = TRACE_MIN_CENTER_TO_CENTER
 
-    # 5 positions centered on the NRZ x-center at minimum spacing
+    # 10 positions centered on the NRZ x-center at minimum spacing
     start_xs = [nrz_cx + (i - (n_per_row - 1) / 2) * min_sp
                 for i in range(n_per_row)]
 
@@ -239,13 +239,13 @@ def load_te_example(num_traces: int = 10, seed: int = None) -> BoardSpec:
     breakout = 0.8626
 
     all_traces = []
-    # Top row: traces 0–4
+    # Top row: traces 0–9
     for i, x in enumerate(start_xs):
         all_traces.append(TraceSpec(
             start_x=x, start_y=top_y,
             breakout_length=breakout, index=i,
         ))
-    # Bottom row: traces 5–9
+    # Bottom row: traces 10–19
     for i, x in enumerate(start_xs):
         all_traces.append(TraceSpec(
             start_x=x, start_y=bot_y,
