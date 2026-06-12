@@ -195,7 +195,9 @@ class Future:
         return self._result
 
 
-class Damy:
+class Dummy:
+    """Synchronous single-process env wrapper with the same interface as Parallel."""
+
     def __init__(self, env):
         self._env = env
 

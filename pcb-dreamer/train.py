@@ -27,7 +27,7 @@ import models
 import tools
 from envs import wrappers
 from envs.dreamer_wrapper import PCBDreamerEnv
-from parallel import Parallel, Damy
+from parallel import Parallel, Dummy
 from dreamer import Dreamer
 
 to_np = lambda x: x.detach().cpu().numpy()
@@ -98,9 +98,9 @@ def main():
     logger = tools.Logger(logdir, config.action_repeat * step)
 
     print("Creating environments...")
-    train_envs = [Damy(make_env("train", i, config.seed, args.num_traces))
+    train_envs = [Dummy(make_env("train", i, config.seed, args.num_traces))
                   for i in range(config.envs)]
-    eval_envs = [Damy(make_env("eval", i, config.seed, args.num_traces))
+    eval_envs = [Dummy(make_env("eval", i, config.seed, args.num_traces))
                  for i in range(config.envs)]
 
     acts = train_envs[0].action_space
