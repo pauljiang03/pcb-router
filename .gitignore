@@ -1,0 +1,12 @@
+logdir/
+.idea/
+.DS_Store
+__pycache__/
+.pytest_cache/
+*.npz
+eval_results/dreamer_eval_logs/
+eval_results/variations/
+eval_results/router_canonical_smart.png
+
+# Trained ordering model is small and ships with the repo
+!models/ordering.npz

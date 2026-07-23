@@ -1,0 +1,16 @@
+# Core (tested with: torch 2.6.0, numpy 2.4.6, gymnasium 1.3.0, Python 3.12)
+torch>=2.0
+numpy>=1.24
+gymnasium>=0.29
+ruamel.yaml
+tensorboard
+
+# Optional
+matplotlib>=3.10         # plots (eval.py default; --no-plot runs without it);
+                         # >=3.10 required with numpy 2.x
+openpyxl                 # canonical board loader (envs.board.load_te_excel)
+pillow                   # PNG rendering (envs.visualize.render_board_png)
+# stable-baselines3      # PPO baseline (train_ppo.py). NOTE: sb3>=2.8 declares
+#                        # torch>=2.8 but runs fine on torch 2.6 (verified);
+#                        # pip may print a resolver warning.
+# moviepy                # tensorboard policy-video encoding (else skipped)
