@@ -37,10 +37,13 @@ defaults:
   units: 512
   act: 'SiLU'
   norm: True
+  # obs["vector"] (exact pin/TP/candidate coordinates) flows through the MLP
+  # branch of both: encoding gives the actor candidate-level precision the
+  # 64x64 image lacks (~2mm/px); decoding forces the latent to retain it.
   encoder:
-    {mlp_keys: '$^', cnn_keys: 'image', act: 'SiLU', norm: True, cnn_depth: 32, kernel_size: 4, minres: 4, mlp_layers: 5, mlp_units: 1024, symlog_inputs: True}
+    {mlp_keys: 'vector', cnn_keys: 'image', act: 'SiLU', norm: True, cnn_depth: 32, kernel_size: 4, minres: 4, mlp_layers: 5, mlp_units: 1024, symlog_inputs: True}
   decoder:
-    {mlp_keys: '$^', cnn_keys: 'image', act: 'SiLU', norm: True, cnn_depth: 32, kernel_size: 4, minres: 4, mlp_layers: 5, mlp_units: 1024, cnn_sigmoid: False, image_dist: mse, vector_dist: symlog_mse, outscale: 1.0}
+    {mlp_keys: 'vector', cnn_keys: 'image', act: 'SiLU', norm: True, cnn_depth: 32, kernel_size: 4, minres: 4, mlp_layers: 5, mlp_units: 1024, cnn_sigmoid: False, image_dist: mse, vector_dist: symlog_mse, outscale: 1.0}
   actor:
     {layers: 2, dist: 'onehot', std: 'none', entropy: 3e-3, unimix_ratio: 0.01, min_std: 0.1, max_std: 1.0, temp: 0.1, lr: 3e-5, eps: 1e-5, grad_clip: 100.0, outscale: 1.0}
   critic:
@@ -63,6 +66,11 @@ defaults:
   demo_fraction: 0.25
   bc_scale: 1.0
   bc_decay: 2e5
+  # The decay never drops below bc_floor * bc_scale: a permanent imitation
+  # anchor that keeps the policy on-manifold, so imagination stays where the
+  # reward head has data (the observed failure at full decay was the actor
+  # chasing hallucinated imagined reward).
+  bc_floor: 0.1
   dyn_scale: 0.5
   rep_scale: 0.1
   kl_free: 1.0
@@ -80,7 +88,10 @@ defaults:
   opt: 'adam'
   discount: 0.997
   discount_lambda: 0.95
-  imag_horizon: 25
+  # Episodes are <= num_traces (20/25) steps; 25-step rollouts spend most of
+  # the horizon past the terminal where the model has NO data, and the reward
+  # head hallucinated there (imag_reward ~+18/step vs real <=+1.5 observed).
+  imag_horizon: 15
   imag_gradient: 'reinforce'
   imag_gradient_mix: 0.0
   eval_state_mean: False

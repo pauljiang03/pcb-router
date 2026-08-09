@@ -104,11 +104,13 @@ def test_demo_collection_roundtrip(tmp_path):
 
     # Same schema tools.simulate writes: policy and demo episodes must batch
     # together interchangeably.
-    for key in ("image", "mask", "is_first", "is_last", "is_terminal",
-                "action", "logprob", "reward", "discount"):
+    for key in ("image", "mask", "vector", "is_first", "is_last",
+                "is_terminal", "action", "logprob", "reward", "discount"):
         assert key in ep, key
     from envs.board import MAX_CANDIDATES
     assert ep["action"].shape == (5, MAX_CANDIDATES)
+    assert ep["vector"].shape == (5, 3 + 2 * 4 + 2 * MAX_CANDIDATES)
+    assert ep["vector"].min() >= -1.0 and ep["vector"].max() <= 1.0
     assert not ep["action"][0].any()                    # zero reset filler
     assert (ep["action"][1:].sum(axis=1) == 1).all()    # one-hot decisions
     assert ep["is_first"][0] and not ep["is_first"][1:].any()
@@ -199,7 +201,7 @@ def _tiny_config(num_actions):
         device="cpu", compile=False, units=16, dyn_hidden=16, dyn_deter=16,
         dyn_stoch=4, dyn_discrete=4, imag_horizon=5, batch_size=2,
         batch_length=8, num_actions=num_actions, video_pred_log=False,
-        bc_scale=1.0, bc_decay=0,
+        bc_scale=1.0, bc_decay=0, bc_floor=0.0,
     ))
     cfg["encoder"] = {**cfg["encoder"], "cnn_depth": 8, "mlp_units": 16}
     cfg["decoder"] = {**cfg["decoder"], "cnn_depth": 8, "mlp_units": 16}
@@ -217,6 +219,7 @@ def _tiny_batch(num_actions, is_demo, B=2, T=8, size=32, seed=0):
     return {
         "image": rng.randint(0, 255, (B, T, size, size, 3)).astype(np.uint8),
         "mask": np.ones((B, T, num_actions), np.float32),
+        "vector": rng.uniform(-1, 1, (B, T, 11)).astype(np.float32),
         "action": action,
         "logprob": np.zeros((B, T), np.float32),
         "reward": rng.randn(B, T).astype(np.float32),
@@ -240,6 +243,8 @@ def test_bc_loss_wiring(tmp_path):
     obs_space = spaces.Dict({
         "image": spaces.Box(0, 255, (32, 32, 3), dtype=np.uint8),
         "mask": spaces.Box(0, 1, (A,), dtype=np.float32),
+        # Exercises the encoder/decoder MLP branch (mlp_keys: 'vector').
+        "vector": spaces.Box(-1, 1, (11,), dtype=np.float32),
         "is_first": spaces.Box(0, 1, (), dtype=np.uint8),
         "is_last": spaces.Box(0, 1, (), dtype=np.uint8),
         "is_terminal": spaces.Box(0, 1, (), dtype=np.uint8),
@@ -269,3 +274,9 @@ def test_bc_loss_wiring(tmp_path):
     agent._step = 1000
     agent._train(_tiny_batch(A, is_demo=1.0))
     assert "bc_loss" not in agent._metrics
+
+    # bc_floor keeps a permanent decayed anchor.
+    agent._metrics.clear()
+    agent._config.bc_floor = 0.5
+    agent._train(_tiny_batch(A, is_demo=1.0))
+    assert agent._metrics["bc_scale"][0] == pytest.approx(0.5)

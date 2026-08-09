@@ -109,7 +109,11 @@ def main():
                              ">1 overlaps CPU routing with GPU training.")
     parser.add_argument("--parallel", action="store_true",
                         help="Run envs in separate processes (use with --envs>1).")
-    parser.add_argument("--reward_mode", type=str, default="layer_aware",
+    # single_layer default: the fixture is one copper layer, and in layer_aware
+    # mode auto-layering routes 20/20 for ANY policy, saturating the routed
+    # term (+10) into a no-signal constant. Planar routed-count is the live,
+    # per-net gradient (and terminals cost ~2x less: no multi-layer retries).
+    parser.add_argument("--reward_mode", type=str, default="single_layer",
                         choices=["layer_aware", "single_layer"])
     parser.add_argument("--boards", type=str, default="mixed",
                         choices=["mixed", "central"],
@@ -137,6 +141,8 @@ def main():
                         help="Parallel demo-generation processes (default: "
                              "min(8, cpus-2); Linux only, serial elsewhere). "
                              "Hard 20-trace boards cost ~30s each serially.")
+    parser.add_argument("--steps", type=float, default=None,
+                        help="Total env steps (overrides config steps).")
     args = parser.parse_args()
 
     config_path = pathlib.Path(__file__).parent / "configs.yaml"
@@ -164,6 +170,8 @@ def main():
         config["demo_fraction"] = args.demo_fraction
     if args.bc_scale is not None:
         config["bc_scale"] = args.bc_scale
+    if args.steps is not None:
+        config["steps"] = args.steps
 
     config["time_limit"] = args.num_traces
 

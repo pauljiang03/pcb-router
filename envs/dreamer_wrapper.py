@@ -35,6 +35,9 @@ class PCBDreamerEnv:
             # Ground-truth valid-action mask (1 = candidate still legal).
             "mask": spaces.Box(0, 1, (self._inner.num_candidates,),
                                dtype=np.float32),
+            # Exact geometry for the encoder/decoder MLP branch (see _vector).
+            "vector": spaces.Box(-1, 1, (self._vector_len(),),
+                                 dtype=np.float32),
             "is_first": spaces.Box(0, 1, (), dtype=np.uint8),
             "is_last": spaces.Box(0, 1, (), dtype=np.uint8),
             "is_terminal": spaces.Box(0, 1, (), dtype=np.uint8),
@@ -52,16 +55,49 @@ class PCBDreamerEnv:
     def _mask(self):
         return self._inner.candidate_mask.astype(np.float32)
 
+    def _vector_len(self):
+        # progress + current-pin xy + placed-TP xys + candidate xys; sized by
+        # the REQUESTED trace count so the shape is board-independent.
+        return 3 + 2 * self._inner._num_traces_requested \
+            + 2 * self._inner.num_candidates
+
+    def _vector(self):
+        """Exact geometric state for the encoder's MLP branch -- coordinates
+        the 64x64 render only carries at ~2mm/pixel: [episode progress,
+        current pin xy, placed TP xys, candidate xys], all normalized to the
+        board bounds, -1 = empty slot. The candidate block grounds each
+        action index to its board position, which the image alone leaves to
+        single dim pixels."""
+        inner = self._inner
+        b = inner.board
+        w, h = max(b.width, 1e-6), max(b.height, 1e-6)
+        nx = lambda x: (x - b.x_min) / w
+        ny = lambda y: (y - b.y_min) / h
+        n_req = inner._num_traces_requested
+        n = inner.num_traces
+        vec = np.full(self._vector_len(), -1.0, dtype=np.float32)
+        vec[0] = inner.current_trace / max(n, 1)
+        if inner.current_trace < n:
+            t = b.traces[inner.current_trace]
+            vec[1], vec[2] = nx(t.start_x), ny(t.start_y)
+        for i, (px, py) in enumerate(inner.placed_tps[:n_req]):
+            vec[3 + 2 * i], vec[4 + 2 * i] = nx(px), ny(py)
+        base = 3 + 2 * n_req
+        for i in range(inner._real_count):
+            cx, cy = inner.candidates[i]
+            vec[base + 2 * i], vec[base + 2 * i + 1] = nx(cx), ny(cy)
+        return vec
+
     def reset(self):
         obs, _ = self._inner.reset(seed=self._seed)
         self._seed += 1
-        return {"image": obs, "mask": self._mask(),
+        return {"image": obs, "mask": self._mask(), "vector": self._vector(),
                 "is_first": True, "is_last": False, "is_terminal": False}
 
     def step(self, action):
         obs, reward, terminated, truncated, info = self._inner.step(int(action))
         done = terminated or truncated
-        out = {"image": obs, "mask": self._mask(),
+        out = {"image": obs, "mask": self._mask(), "vector": self._vector(),
                "is_first": False, "is_last": done, "is_terminal": terminated}
         comp = info.get("reward_components", {})
         # Zero mid-episode, so each episode sum equals the terminal value.

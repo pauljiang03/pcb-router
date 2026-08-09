@@ -270,10 +270,13 @@ class TPPlacementEnv(gym.Env):
 
         finite = [l for l in lengths if l < float('inf')]
         if finite:
-            comp["length"] = -10.0 * sum(finite) / (len(finite) * diag)
+            # Normalization and weights mirror routing_reward's w_len/w_maxlen
+            # (and the PHI_W_* shaping constants), so both reward modes apply
+            # the same length pressure.
+            comp["length"] = -PHI_W_LEN * sum(finite) / (max(self.num_traces, 1) * diag)
             reward += comp["length"]
             # Equalization pads every trace to the max, so final length = n * max.
-            comp["length_max"] = -6.0 * max(finite) / diag
+            comp["length_max"] = -PHI_W_MAXLEN * max(finite) / diag
             reward += comp["length_max"]
             # Penalize spread so post-hoc meandering can equalize lengths.
             if len(finite) > 1:

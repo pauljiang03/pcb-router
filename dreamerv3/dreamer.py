@@ -67,6 +67,10 @@ class Dreamer(nn.Module):
                 self._metrics["update_count"] = self._update_count
             if self._should_log(step):
                 for name, values in self._metrics.items():
+                    # Intermittent metrics (e.g. bc_loss after decay) leave an
+                    # empty list; mean([]) would log a confusing NaN forever.
+                    if not len(values):
+                        continue
                     self._logger.scalar(name, float(np.mean(values)))
                     self._metrics[name] = []
                 if self._config.video_pred_log:
@@ -147,7 +151,13 @@ class Dreamer(nn.Module):
             return None
         decay = float(getattr(self._config, "bc_decay", 0.0))
         if decay > 0:
-            scale *= max(0.0, 1.0 - self._step / decay)
+            frac = max(0.0, 1.0 - self._step / decay)
+            # bc_floor keeps a permanent imitation anchor: without it the
+            # observed failure mode is the actor drifting into latent states
+            # the reward head has never seen and chasing hallucinated imagined
+            # reward once BC fully decays (model exploitation).
+            frac = max(frac, float(getattr(self._config, "bc_floor", 0.0)))
+            scale *= frac
         if scale <= 0.0:
             return None
         device = self._config.device
