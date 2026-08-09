@@ -127,7 +127,8 @@ class Dreamer(nn.Module):
         reward = lambda f, s, a: self._wm.heads["reward"](
             self._wm.dynamics.get_feat(s)
         ).mode()
-        metrics.update(self._task_behavior._train(start, reward)[-1])
+        bc = self._bc_data(data, post)
+        metrics.update(self._task_behavior._train(start, reward, bc=bc)[-1])
         if self._config.expl_behavior != "greedy":
             mets = self._expl_behavior.train(start, context, data)[-1]
             metrics.update({"expl_" + key: value for key, value in mets.items()})
@@ -136,6 +137,36 @@ class Dreamer(nn.Module):
                 self._metrics[name] = [value]
             else:
                 self._metrics[name].append(value)
+
+    def _bc_data(self, data, post):
+        """Behavior-cloning targets for the cold start: demo-flagged real
+        transitions paired with the world model's posterior features. Returns
+        None when BC is off, fully decayed, or the batch has no demo steps."""
+        scale = float(getattr(self._config, "bc_scale", 0.0))
+        if scale <= 0.0 or "is_demo" not in data:
+            return None
+        decay = float(getattr(self._config, "bc_decay", 0.0))
+        if decay > 0:
+            scale *= max(0.0, 1.0 - self._step / decay)
+        if scale <= 0.0:
+            return None
+        device = self._config.device
+        tensor = lambda key: torch.tensor(
+            np.asarray(data[key]), device=device, dtype=torch.float32)
+        is_demo = tensor("is_demo")
+        is_first = tensor("is_first")
+        # data["action"][t] produced obs t, i.e. was chosen in state t-1: pair
+        # feat[:, :-1] with action[:, 1:]. Episode boundaries are excluded --
+        # there the stored action is the zero reset filler, not a decision.
+        weight = is_demo[:, 1:] * (1.0 - is_first[:, 1:])
+        if weight.sum() == 0:
+            return None
+        feat = self._wm.dynamics.get_feat(post)  # post is already detached
+        mask = None
+        if getattr(self._config, "use_action_mask", False) and "mask" in data:
+            mask = tensor("mask")[:, :-1]  # ground-truth valid mask in state t
+        return dict(feat=feat[:, :-1], action=tensor("action")[:, 1:],
+                    mask=mask, weight=weight, scale=scale)
 
 
 def count_steps(folder):

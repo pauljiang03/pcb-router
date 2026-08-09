@@ -314,6 +314,7 @@ class ImagBehavior(nn.Module):
         self,
         start,
         objective,
+        bc=None,
     ):
         self._update_slow_target()
         metrics = {}
@@ -339,6 +340,18 @@ class ImagBehavior(nn.Module):
                 )
                 actor_loss -= self._config.actor["entropy"] * actor_ent[:-1, ..., None]
                 actor_loss = torch.mean(actor_loss)
+                if bc is not None:
+                    # Cold start: pull the actor toward expert actions on real
+                    # posterior states, through the same masked dist that acts
+                    # in the env. `bc` comes from Dreamer._bc_data (weight =
+                    # demo steps only, scale = decayed bc_scale).
+                    bc_dist = self._apply_mask(self.actor(bc["feat"]), bc["mask"])
+                    bc_nll = -bc_dist.log_prob(bc["action"])
+                    bc_loss = (bc["weight"] * bc_nll).sum() / torch.clamp(
+                        bc["weight"].sum(), min=1.0)
+                    actor_loss = actor_loss + bc["scale"] * bc_loss
+                    metrics["bc_loss"] = to_np(bc_loss)
+                    metrics["bc_scale"] = bc["scale"]
                 metrics.update(mets)
                 value_input = imag_feat
 

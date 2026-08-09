@@ -30,6 +30,7 @@ def make_env(num_traces, base_seed, reward_mode):
         env = TPPlacementEnv(
             num_traces=num_traces, seed=base_seed, reward_mode=reward_mode,
             route_n_starts=1, route_max_iters=12,   # fast preset, as in training
+            shaping="potential",  # per-step credit; episode totals unchanged
         )
         return SeededBoards(env, base_seed)
     return _thunk

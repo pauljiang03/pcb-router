@@ -6,6 +6,7 @@ Run: python eval.py --episodes 5 --num_traces 10 [--freerouting] [--checkpoint .
 import argparse
 import pathlib
 import os
+import time
 
 os.environ["MUJOCO_GL"] = "osmesa"
 
@@ -16,19 +17,45 @@ from envs.routing import route_all_traces, validate_routing_constraints
 # matplotlib / torch / dreamerv3 are imported lazily so the numeric A* eval runs without them.
 
 
-def evaluate_placement(board, placed_tps, use_freerouting=False):
-    """Route and score a placement."""
+def _board_key(board):
+    """Cheap board fingerprint for result caching (id() alone could be reused
+    after garbage collection)."""
+    return (round(board.x_min, 3), round(board.x_max, 3),
+            round(board.y_min, 3), round(board.y_max, 3),
+            round(board.connector_x, 3), round(board.connector_y, 3),
+            tuple((round(t.start_x, 3), round(t.start_y, 3))
+                  for t in board.traces))
+
+
+# (board, placement, router settings) -> result. Routing is deterministic, and
+# the default fixed-board mode scores IDENTICAL placements every episode for
+# the deterministic baselines -- without this, that work is redone per episode
+# (30s+ per unroutable 20-trace placement at the quality budget).
+_route_cache = {}
+
+
+def evaluate_placement(board, placed_tps, use_freerouting=False, route_kw=None):
+    """Route and score a placement (memoized; route_kw overrides the quality
+    router budget, e.g. the --fast preset)."""
+    key = (_board_key(board),
+           tuple(None if p is None else (round(p[0], 6), round(p[1], 6))
+                 for p in placed_tps),
+           use_freerouting,
+           tuple(sorted((route_kw or {}).items())))
+    if key in _route_cache:
+        return _route_cache[key]
     if use_freerouting:
         from envs.freerouting import route_with_freerouting
         paths, lengths, failures = route_with_freerouting(board, placed_tps)
     else:
-        paths, lengths, failures = route_all_traces(board, placed_tps)
+        paths, lengths, failures = route_all_traces(
+            board, placed_tps, **(route_kw or {}))
 
     validation = validate_routing_constraints(board, paths)
     finite = [l for l in lengths if l < float('inf')]
     spread = ((max(finite) - min(finite)) / np.mean(finite)
               if len(finite) > 1 else 0)
-    return {
+    result = {
         "placed": placed_tps, "paths": paths, "lengths": lengths,
         "failures": failures,
         "total_length": sum(finite) if finite else 0,
@@ -37,9 +64,11 @@ def evaluate_placement(board, placed_tps, use_freerouting=False):
         "spread": spread,
         "validation": validation,
     }
+    _route_cache[key] = result
+    return result
 
 
-def run_random_baseline(boards, num_traces, use_freerouting=False):
+def run_random_baseline(boards, num_traces, use_freerouting=False, route_kw=None):
     """Random TP placement, one per trace in order."""
     results = []
     rng = np.random.RandomState(0)
@@ -53,11 +82,11 @@ def run_random_baseline(boards, num_traces, use_freerouting=False):
                     break
             else:
                 placed.append(tuple(candidates[rng.randint(len(candidates))]))
-        results.append(evaluate_placement(board, placed, use_freerouting))
+        results.append(evaluate_placement(board, placed, use_freerouting, route_kw))
     return results
 
 
-def run_greedy_baseline(boards, num_traces, use_freerouting=False):
+def run_greedy_baseline(boards, num_traces, use_freerouting=False, route_kw=None):
     """For each trace, pick the closest valid candidate."""
     results = []
     for board, candidates in boards:
@@ -73,11 +102,11 @@ def run_greedy_baseline(boards, num_traces, use_freerouting=False):
                     break
             else:
                 placed.append(tuple(candidates[np.argsort(dists)[0]]))
-        results.append(evaluate_placement(board, placed, use_freerouting))
+        results.append(evaluate_placement(board, placed, use_freerouting, route_kw))
     return results
 
 
-def run_spread_baseline(boards, num_traces, use_freerouting=False):
+def run_spread_baseline(boards, num_traces, use_freerouting=False, route_kw=None):
     """Place TPs far from connector, well-spread, then assign in order."""
     results = []
     for board, candidates in boards:
@@ -102,11 +131,11 @@ def run_spread_baseline(boards, num_traces, use_freerouting=False):
                     placed.append((cx, cy))
             if len(placed) == before:      # board can't fit num_traces TPs
                 break
-        results.append(evaluate_placement(board, placed, use_freerouting))
+        results.append(evaluate_placement(board, placed, use_freerouting, route_kw))
     return results
 
 
-def run_planar_baseline(boards, num_traces, use_freerouting=False):
+def run_planar_baseline(boards, num_traces, use_freerouting=False, route_kw=None):
     """Non-crossing by construction: match pins<->TPs in angular order around the connector."""
     results = []
     for board, candidates in boards:
@@ -133,23 +162,27 @@ def run_planar_baseline(boards, num_traces, use_freerouting=False):
                     if check_tp_spacing([q for q in placed if q], cx, cy):
                         placed[i] = (cx, cy)
                         break
-        results.append(evaluate_placement(board, placed, use_freerouting))
+        results.append(evaluate_placement(board, placed, use_freerouting, route_kw))
     return results
 
 
-def run_smart_baseline(boards, num_traces, use_freerouting=False):
+def run_smart_baseline(boards, num_traces, use_freerouting=False, route_kw=None):
     """No-training smart_placement: heuristics elected by trial routing (strongest classical baseline)."""
     from envs.board import smart_placement
     results = []
+    placements = {}  # fixed-board mode: don't rerun the election per episode
     for board, _candidates in boards:
-        placed = smart_placement(board, num_traces)
-        results.append(evaluate_placement(board, placed, use_freerouting))
+        bkey = _board_key(board)
+        if bkey not in placements:
+            placements[bkey] = smart_placement(board, num_traces)
+        results.append(evaluate_placement(board, placements[bkey],
+                                          use_freerouting, route_kw))
     return results
 
 
 def run_dreamer_policy(checkpoint, boards, num_traces, board_seed=None,
                        configs=("defaults",), device="cpu",
-                       use_freerouting=False, log_dir=None):
+                       use_freerouting=False, log_dir=None, route_kw=None):
     """Roll a trained Dreamer policy on the same boards and score with the same router as the baselines."""
     import torch
     import ruamel.yaml as yaml
@@ -207,7 +240,8 @@ def run_dreamer_policy(checkpoint, boards, num_traces, board_seed=None,
             action = {"action": np.array(out["action"][0].detach().cpu())}
             obs, _reward, done, _info = env.step(action)
         results.append(evaluate_placement(
-            denv._inner.board, list(denv._inner.placed_tps), use_freerouting))
+            denv._inner.board, list(denv._inner.placed_tps), use_freerouting,
+            route_kw))
     return results
 
 
@@ -232,9 +266,19 @@ def main():
                              "match the trained model)")
     parser.add_argument("--device", type=str, default="cpu",
                         help="Device for --checkpoint inference")
+    parser.add_argument("--fast", action="store_true",
+                        help="Score with the training router budget "
+                             "(n_starts=1, max_iters=12, repair_passes=1) "
+                             "instead of the quality budget. 10-30x faster on "
+                             "unroutable placements; failure counts can come "
+                             "out slightly higher.")
     args = parser.parse_args()
 
     router_name = "FreeRouting" if args.freerouting else "A*"
+    route_kw = (dict(n_starts=1, max_iters=12, repair_passes=1)
+                if args.fast else None)
+    if args.fast:
+        router_name += " fast"
     outdir = pathlib.Path("eval_results")
     outdir.mkdir(exist_ok=True)
 
@@ -278,25 +322,21 @@ def main():
                                  f"{r['total_length']:.0f}mm",
                            filename=str(outdir / f"{name.lower()}_{i + 1}.png"))
 
-    print(f"\n--- Random Baseline ({router_name}) ---")
-    random_results = run_random_baseline(boards, args.num_traces, args.freerouting)
-    print_results("Random", random_results)
+    def timed(name, runner):
+        """Run one method with a wall-clock readout (slow evals look hung
+        otherwise -- an unroutable placement costs 30s+ at the quality budget)."""
+        print(f"\n--- {name} Baseline ({router_name}) ---")
+        t0 = time.perf_counter()
+        results = runner(boards, args.num_traces, args.freerouting, route_kw)
+        print(f"  [{time.perf_counter() - t0:.1f}s]")
+        print_results(name, results)
+        return results
 
-    print(f"\n--- Greedy Baseline ({router_name}) ---")
-    greedy_results = run_greedy_baseline(boards, args.num_traces, args.freerouting)
-    print_results("Greedy", greedy_results)
-
-    print(f"\n--- Spread Baseline ({router_name}) ---")
-    spread_results = run_spread_baseline(boards, args.num_traces, args.freerouting)
-    print_results("Spread", spread_results)
-
-    print(f"\n--- Planar Baseline ({router_name}) ---")
-    planar_results = run_planar_baseline(boards, args.num_traces, args.freerouting)
-    print_results("Planar", planar_results)
-
-    print(f"\n--- Smart Baseline ({router_name}) ---")
-    smart_results = run_smart_baseline(boards, args.num_traces, args.freerouting)
-    print_results("Smart", smart_results)
+    random_results = timed("Random", run_random_baseline)
+    greedy_results = timed("Greedy", run_greedy_baseline)
+    spread_results = timed("Spread", run_spread_baseline)
+    planar_results = timed("Planar", run_planar_baseline)
+    smart_results = timed("Smart", run_smart_baseline)
 
     tables = [("Random", random_results), ("Greedy", greedy_results),
               ("Spread", spread_results), ("Planar", planar_results),
@@ -304,11 +344,13 @@ def main():
 
     if args.checkpoint:
         print(f"\n--- Dreamer Policy ({router_name}) ---  ({args.checkpoint})")
+        t0 = time.perf_counter()
         dreamer_results = run_dreamer_policy(
             args.checkpoint, boards, args.num_traces,
             board_seed=args.board_seed, configs=args.configs,
             device=args.device, use_freerouting=args.freerouting,
-            log_dir=str(outdir / "dreamer_eval_logs"))
+            log_dir=str(outdir / "dreamer_eval_logs"), route_kw=route_kw)
+        print(f"  [{time.perf_counter() - t0:.1f}s]")
         print_results("Dreamer", dreamer_results)
         tables.append(("Dreamer", dreamer_results))
 

@@ -8,11 +8,22 @@ from typing import Optional, List, Tuple
 
 from envs.board import (
     BoardSpec, load_te_example, generate_candidate_grid,
-    check_tp_spacing, TP_TO_TP_MIN, TP_TO_EDGE_MIN, MAX_CANDIDATES,
+    check_tp_spacing, wire_estimate, TP_TO_TP_MIN, TP_TO_EDGE_MIN, MAX_CANDIDATES,
 )
 from envs.routing import route_all_traces as route_astar
+from envs.routing import count_crossings
 
 IMG_SIZE = 64
+
+# Potential-shaping weights. Length terms mirror routing_reward's w_len/w_maxlen
+# (keep them in sync) so the potential approximates the terminal length terms
+# and the terminal residual stays small; the crossing term prices a pin->TP
+# chord crossing (a planarity risk the router must detour around) well below
+# the terminal -100/crossing cliff, since estimated crossings are often
+# routable.
+PHI_W_LEN = 3.0
+PHI_W_MAXLEN = 9.0
+PHI_W_CROSS = 1.5
 
 
 class TPPlacementEnv(gym.Env):
@@ -31,6 +42,7 @@ class TPPlacementEnv(gym.Env):
         route_repair_passes: int = 3,
         reward_mode: str = "single_layer",
         board_factory=None,
+        shaping: str = "none",
     ):
         super().__init__()
         self.render_mode = render_mode
@@ -46,6 +58,15 @@ class TPPlacementEnv(gym.Env):
         # "single_layer": one-layer routing, penalize failures; "layer_aware":
         # routing_reward pushes toward placements routable on the fewest layers/vias.
         self._reward_mode = reward_mode
+        # "potential": redistribute the terminal reward across steps via a cheap
+        # placement potential (wire_estimate lengths + pin->TP chord crossings).
+        # Each step pays phi_t - phi_{t-1}; the terminal step pays the true
+        # routing reward minus phi_n, so every episode's TOTAL reward is
+        # identical to shaping="none" -- the optimal policy is unchanged, but
+        # credit lands on the placement that caused it and the reward head gets
+        # smooth per-step targets instead of one terminal cliff.
+        assert shaping in ("none", "potential"), shaping
+        self._shaping = shaping
         # board_factory(seed) -> BoardSpec; defaults to the central connector example.
         self._board_factory = board_factory or (
             lambda s: load_te_example(num_traces=self._num_traces_requested, seed=s))
@@ -76,6 +97,9 @@ class TPPlacementEnv(gym.Env):
         self.routed_paths = None
         self.routed_lengths = None
         self._reward_components: dict = {}
+        self._phi = 0.0
+        self._est_lens: List[float] = []
+        self._est_segs: List[List[Tuple[float, float]]] = []
 
     # ---- coordinate / drawing helpers ----
 
@@ -177,6 +201,28 @@ class TPPlacementEnv(gym.Env):
         d = ((self.candidates[pool, 0] - ref[0]) ** 2 +
              (self.candidates[pool, 1] - ref[1]) ** 2)
         return int(pool[int(np.argmin(d))])
+
+    # ---- potential shaping ----
+
+    def _potential_delta(self) -> float:
+        """Update the placement potential with the just-placed TP and return
+        phi_new - phi_old. The potential scores the partial placement with the
+        realizable per-net length estimate (wire_estimate + breakout, matching
+        how routed lengths are reported) and the number of crossing pin->TP
+        chords, normalized like routing_reward's length terms."""
+        trace = self.board.traces[len(self.placed_tps) - 1]
+        tp = self.placed_tps[-1]
+        est = wire_estimate(self.board, trace, tp) + trace.breakout_length
+        self._est_lens.append(est)
+        self._est_segs.append([(trace.start_x, trace.start_y), tp])
+        diag = np.hypot(self.board.width, self.board.height)
+        n = max(self.num_traces, 1)
+        phi = (-PHI_W_LEN * sum(self._est_lens) / (n * diag)
+               - PHI_W_MAXLEN * max(self._est_lens) / diag
+               - PHI_W_CROSS * count_crossings(self._est_segs))
+        delta = phi - self._phi
+        self._phi = phi
+        return delta
 
     # ---- validation (runs after all TPs placed) ----
 
@@ -296,6 +342,9 @@ class TPPlacementEnv(gym.Env):
         self.routed_paths = None
         self.routed_lengths = None
         self._reward_components = {}
+        self._phi = 0.0
+        self._est_lens = []
+        self._est_segs = []
         return self._render_obs(), self._get_info()
 
     def step(self, action: int):
@@ -320,10 +369,18 @@ class TPPlacementEnv(gym.Env):
         valid_frac = self.candidate_mask[:self._real_count].sum() / max(self._real_count, 1)
         reward += 0.3 * valid_frac
 
+        if self._shaping == "potential":
+            reward += self._potential_delta()
+
         terminated = self.current_trace >= self.num_traces
 
         if terminated:
             reward += self._validate()
+            if self._shaping == "potential":
+                # The potential deltas telescoped to phi_n; refund it so the
+                # episode total exactly equals the unshaped total.
+                reward -= self._phi
+                self._reward_components["phi"] = self._phi
 
         return self._render_obs(), reward, terminated, False, self._get_info()
 

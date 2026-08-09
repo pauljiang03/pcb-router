@@ -55,6 +55,14 @@ defaults:
   use_action_mask: True
   mask_head:
     {layers: 2, loss_scale: 1.0, outscale: 1.0}
+  # Cold start: smart_placement demo episodes cached in <logdir>/demo_eps,
+  # sampled into batches at a fixed fraction (so they never dilute away), and
+  # imitated by a behavior-cloning term on the actor that decays linearly from
+  # bc_scale to 0 over bc_decay env steps. demo_episodes: 0 disables all of it.
+  demo_episodes: 200
+  demo_fraction: 0.25
+  bc_scale: 1.0
+  bc_decay: 2e5
   dyn_scale: 0.5
   rep_scale: 0.1
   kl_free: 1.0
@@ -88,6 +96,26 @@ defaults:
   disag_units: 400
   disag_action_cond: False
 
+# Sized for a single free-Colab T4 session (~2-4 h at 8 traces): checkpoints
+# every 2.5k steps survive disconnects; BC fully decays mid-run so the second
+# half is pure RL refinement. Use: python train.py --configs defaults colab
+colab:
+  steps: 3e4
+  eval_every: 2.5e3
+  log_every: 1e3
+  prefill: 2500
+  demo_episodes: 150
+  bc_decay: 1.5e4
+
+# Sized for a Colab Pro A100 at 20 traces (~3-6 h for 100k steps; checkpoints
+# every 5k). Use: python train.py --configs defaults colab_a100 --num_traces 20
+colab_a100:
+  steps: 1e5
+  eval_every: 5e3
+  log_every: 1e3
+  demo_episodes: 200
+  bc_decay: 4e4
+
 debug:
   debug: True
   pretrain: 10
@@ -99,3 +127,5 @@ debug:
   eval_episode_num: 2
   log_every: 100
   video_pred_log: False
+  demo_episodes: 5
+  bc_decay: 500

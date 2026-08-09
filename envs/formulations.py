@@ -64,9 +64,14 @@ DEEPER = "ordered_layer"
 
 
 def routing_reward(board, paths, lengths, layer_of, *,
-                   w_route=10.0, w_layer=3.0, w_via=0.5, w_len=2.0,
-                   w_maxlen=6.0, w_cross=100.0):
-    """Shared terminal reward for any formulation (higher is better)."""
+                   w_route=10.0, w_layer=3.0, w_via=0.5, w_len=3.0,
+                   w_maxlen=9.0, w_cross=100.0, w_fail=1.5):
+    """Shared terminal reward for any formulation (higher is better).
+
+    w_len/w_maxlen are deliberately high relative to w_route/n: once a board
+    routes cleanly the remaining gradient is length. w_fail keeps routability
+    strictly dominant anyway -- without it, dropping the LONGEST net could pay
+    (max_len falls by more than the lost w_route/n credit at 20 traces)."""
     n = len(paths)
     routed = sum(1 for p in paths if p)
     used = sorted(set(l for l in layer_of if l >= 0))
@@ -80,6 +85,7 @@ def routing_reward(board, paths, lengths, layer_of, *,
                         for L in used), default=0)
     # Equalization pads every trace to the max, so final board length = n * max.
     reward = (w_route * routed / max(n, 1)
+              - w_fail * (n - routed)
               - w_layer * (layers - 1)
               - w_via * vias
               - w_len * total_len / max(n * diag, 1e-6)

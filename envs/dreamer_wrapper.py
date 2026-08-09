@@ -12,18 +12,19 @@ class PCBDreamerEnv:
     # the episode and logs it to tensorboard. Fixed set keeps cache arrays aligned.
     _LOG_KEYS = ("routing", "routable", "routed", "layers", "vias",
                  "same_layer_crossings", "length", "length_max", "max_len",
-                 "spread", "compactness")
+                 "spread", "compactness", "phi")
 
     def __init__(self, num_traces=8, seed=0, reward_mode="layer_aware",
                  route_n_starts=1, route_max_iters=12, route_repair_passes=1,
-                 board_factory=None):
+                 board_factory=None, shaping="none"):
         # Fast routing preset for training; failures are placement- not
         # search-determined, so quality settings are left to eval.
         self._inner = TPPlacementEnv(
             num_traces=num_traces, seed=seed, use_freerouting=False,
             reward_mode=reward_mode, route_n_starts=route_n_starts,
             route_max_iters=route_max_iters,
-            route_repair_passes=route_repair_passes, board_factory=board_factory)
+            route_repair_passes=route_repair_passes, board_factory=board_factory,
+            shaping=shaping)
         self._seed = seed
         self.reward_range = [-np.inf, np.inf]
 

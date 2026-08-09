@@ -29,9 +29,31 @@ Figures for this and other boards: [`eval_results/equalized/`](eval_results/equa
 pip install -r requirements.txt
 
 python -m pytest tests/ -q                              # unit tests
-python eval.py --episodes 5 --num_traces 20 --no-plot   # baseline metrics
+python eval.py --episodes 5 --num_traces 20 --no-plot   # baseline metrics (--fast: quick low-budget pass)
 python scripts/route_canonical.py --mirror --figs       # canonical 20/20 board
 
 python train.py --configs defaults --device cuda:0 --num_traces 20   # train Dreamer
 python train_ppo.py --steps 200000 --num_traces 8                    # PPO baseline
 ```
+
+## Cold start + dense reward (on by default in train.py)
+
+The terminal routing reward is a cliff-shaped function of the whole placement,
+and random exploration rarely produces a fully-routed episode for the reward
+head to learn from. Training therefore uses three additions (each can be
+disabled):
+
+- **Expert demos** — `smart_placement` episodes are generated once into
+  `<logdir>/demo_eps` (resumable; also standalone via `python demos.py`) and
+  sampled into batches at a fixed fraction so the world model and reward head
+  see high-reward placements from step 0. `--demos 0` disables.
+- **Decayed behavior cloning** — demo steps add a BC term to the actor loss
+  through the same masked policy dist that acts in the env, decaying linearly
+  from `bc_scale` to 0 over `bc_decay` env steps (so RL can eventually beat
+  the heuristic instead of anchoring to it). `--bc_scale 0` disables.
+- **Potential-based reward shaping** — each step pays the delta of a cheap
+  placement potential (`wire_estimate` lengths + crossing pin→TP chords) and
+  the terminal step refunds it, so episode totals are *identical* to the
+  unshaped env (train_return stays comparable) while credit lands on the
+  placement that caused it. `shaping="none"` in the env restores the old
+  per-step rewards; `eval.py` scoring is unaffected either way.

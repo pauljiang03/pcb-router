@@ -28,6 +28,32 @@ from dreamerv3.dreamer import Dreamer
 
 to_np = lambda x: x.detach().cpu().numpy()
 
+# Board-seed ranges: train uses seed + 10_000*env_id, eval seed + 1_000_000;
+# expert demos draw from a third disjoint range.
+DEMO_SEED_OFFSET = 2_000_000
+
+
+def tag_is_demo(generator, flag):
+    """Stamp every sequence from `generator` with a per-step is_demo flag
+    (1.0 = expert demonstration), consumed by the behavior-cloning loss."""
+    while True:
+        seq = next(generator)
+        length = len(next(iter(seq.values())))
+        seq["is_demo"] = np.full((length,), flag, np.float32)
+        yield seq
+
+
+def mixed_generator(train_gen, demo_gen, demo_fraction, seed=0):
+    """Yield demo sequences with probability `demo_fraction`, else on-policy
+    ones. A fixed fraction (rather than uniform buffer sampling) keeps expert
+    data from diluting away as the on-policy buffer grows."""
+    rng = np.random.RandomState(seed)
+    while True:
+        if rng.rand() < demo_fraction:
+            yield next(demo_gen)
+        else:
+            yield next(train_gen)
+
 
 def mixed_board_factory(num_traces):
     """Per-episode board sampler: 50% TE board / 50% moat challenge, random orientation, deterministic per seed."""
@@ -51,14 +77,15 @@ def mixed_board_factory(num_traces):
 
 
 def make_env(mode, env_id, seed=0, num_traces=8, reward_mode="layer_aware",
-             route_n_starts=1, route_max_iters=12, boards="mixed"):
+             route_n_starts=1, route_max_iters=12, boards="mixed",
+             shaping="potential"):
     factory = mixed_board_factory(num_traces) if boards == "mixed" else None
     # Space workers 10k seeds apart; +env_id would replay ~the same board stream.
     env = PCBDreamerEnv(num_traces=num_traces, seed=seed + 10_000 * env_id,
                         reward_mode=reward_mode,
                         route_n_starts=route_n_starts,
                         route_max_iters=route_max_iters,
-                        board_factory=factory)
+                        board_factory=factory, shaping=shaping)
     env = wrappers.OneHotAction(env)
     env = wrappers.TimeLimit(env, num_traces)
     env = wrappers.SelectAction(env, key="action")
@@ -89,6 +116,23 @@ def main():
                         help="Training board distribution: 'mixed' samples the "
                              "central TE board and parametric moat challenge "
                              "boards 50/50; 'central' uses only the TE board.")
+    parser.add_argument("--demos", type=int, default=None,
+                        help="Expert (smart_placement) episodes to keep in "
+                             "<logdir>/demo_eps for the cold start (overrides "
+                             "config demo_episodes; 0 disables demos+BC).")
+    parser.add_argument("--demo_fraction", type=float, default=None,
+                        help="Fraction of training sequences drawn from the "
+                             "demo set (overrides config demo_fraction).")
+    parser.add_argument("--bc_scale", type=float, default=None,
+                        help="Initial behavior-cloning loss weight on the "
+                             "actor (overrides config bc_scale; decays "
+                             "linearly to 0 over bc_decay env steps).")
+    parser.add_argument("--shaping", type=str, default="potential",
+                        choices=["potential", "none"],
+                        help="Env reward shaping: 'potential' redistributes "
+                             "the terminal reward across steps (totals "
+                             "unchanged); 'none' is the legacy terminal-only "
+                             "reward.")
     args = parser.parse_args()
 
     config_path = pathlib.Path(__file__).parent / "configs.yaml"
@@ -110,6 +154,12 @@ def main():
         config["envs"] = args.envs
     if args.parallel:
         config["parallel"] = True
+    if args.demos is not None:
+        config["demo_episodes"] = args.demos
+    if args.demo_fraction is not None:
+        config["demo_fraction"] = args.demo_fraction
+    if args.bc_scale is not None:
+        config["bc_scale"] = args.bc_scale
 
     config["time_limit"] = args.num_traces
 
@@ -141,7 +191,7 @@ def main():
     def wrap_env(mode, env_id, base_seed):
         # Worker processes let CPU routing in env.step overlap GPU training.
         env = make_env(mode, env_id, base_seed, args.num_traces, args.reward_mode,
-                       boards=args.boards)
+                       boards=args.boards, shaping=args.shaping)
         return Parallel(env, "process") if config.parallel else Damy(env)
 
     train_envs = [wrap_env("train", i, config.seed) for i in range(config.envs)]
@@ -155,6 +205,25 @@ def main():
 
     train_eps = tools.load_episodes(config.traindir, limit=config.dataset_size)
     eval_eps = tools.load_episodes(config.evaldir, limit=1)
+
+    # Expert demonstrations (cold start): generated once, cached on disk,
+    # replayed into training batches at a fixed fraction below.
+    demo_eps = {}
+    demo_episodes = int(getattr(config, "demo_episodes", 0))
+    if demo_episodes > 0:
+        from demos import collect_demos
+        demodir = logdir / "demo_eps"
+
+        def demo_env_fn(offset):
+            # Same shaping as the training envs: demo episodes' stored rewards
+            # must come from the same reward function as policy episodes.
+            return make_env("demo", 0,
+                            config.seed + DEMO_SEED_OFFSET + offset,
+                            args.num_traces, args.reward_mode,
+                            boards=args.boards, shaping=args.shaping)
+
+        collect_demos(demodir, demo_env_fn, demo_episodes)
+        demo_eps = tools.load_episodes(demodir)
 
     state = None
     prefill = max(0, config.prefill - count_steps(config.traindir))
@@ -172,9 +241,20 @@ def main():
             logger, limit=config.dataset_size, steps=prefill,
         )
         logger.step += prefill * config.action_repeat
-    dataset = tools.from_generator(
-        tools.sample_episodes(train_eps, config.batch_length), config.batch_size
-    )
+    train_gen = tools.sample_episodes(
+        train_eps, config.batch_length, seed=config.seed)
+    demo_fraction = float(getattr(config, "demo_fraction", 0.0))
+    if demo_eps and demo_fraction > 0:
+        print(f"Demo mixing: {len(demo_eps)} expert episodes at "
+              f"fraction {demo_fraction} (is_demo tags feed the BC loss)")
+        demo_gen = tag_is_demo(
+            tools.sample_episodes(demo_eps, config.batch_length,
+                                  seed=config.seed + 1), 1.0)
+        generator = mixed_generator(tag_is_demo(train_gen, 0.0), demo_gen,
+                                    demo_fraction, seed=config.seed + 2)
+    else:
+        generator = train_gen
+    dataset = tools.from_generator(generator, config.batch_size)
     eval_dataset = tools.from_generator(
         tools.sample_episodes(eval_eps, config.batch_length), config.batch_size
     )
