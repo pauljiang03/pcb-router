@@ -66,13 +66,7 @@ class Dreamer(nn.Module):
                 self._update_count += 1
                 self._metrics["update_count"] = self._update_count
             if self._should_log(step):
-                for name, values in self._metrics.items():
-                    # Intermittent metrics (e.g. bc_loss after decay) leave an
-                    # empty list; mean([]) would log a confusing NaN forever.
-                    if not len(values):
-                        continue
-                    self._logger.scalar(name, float(np.mean(values)))
-                    self._metrics[name] = []
+                self._log_metrics()
                 if self._config.video_pred_log:
                     openl = self._wm.video_pred(next(self._dataset))
                     self._logger.video("train_openl", to_np(openl))
@@ -141,6 +135,16 @@ class Dreamer(nn.Module):
                 self._metrics[name] = [value]
             else:
                 self._metrics[name].append(value)
+
+    def _log_metrics(self):
+        for name, values in self._metrics.items():
+            # Intermittent metrics (e.g. bc_loss after full decay) leave an
+            # empty list; mean([]) would log a confusing NaN forever. Scalars
+            # (update_count is stored as a plain int) log as-is.
+            if isinstance(values, list) and not values:
+                continue
+            self._logger.scalar(name, float(np.mean(values)))
+            self._metrics[name] = []
 
     def _bc_data(self, data, post):
         """Behavior-cloning targets for the cold start: demo-flagged real

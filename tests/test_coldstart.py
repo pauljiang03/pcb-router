@@ -280,3 +280,20 @@ def test_bc_loss_wiring(tmp_path):
     agent._config.bc_floor = 0.5
     agent._train(_tiny_batch(A, is_demo=1.0))
     assert agent._metrics["bc_scale"][0] == pytest.approx(0.5)
+
+
+def test_log_metrics_handles_scalars_and_empties(tmp_path):
+    pytest.importorskip("torch")
+    from types import SimpleNamespace
+    from dreamerv3 import tools
+    from dreamerv3.dreamer import Dreamer
+
+    # __call__ stores lists for training metrics but a plain int for
+    # update_count, and intermittent metrics leave empty lists behind.
+    fake = SimpleNamespace(
+        _metrics={"loss": [1.0, 3.0], "update_count": 7, "stale": []},
+        _logger=tools.Logger(pathlib.Path(tmp_path), 0))
+    Dreamer._log_metrics(fake)
+    assert fake._metrics["loss"] == []
+    assert fake._metrics["update_count"] == []
+    assert fake._metrics["stale"] == []  # skipped, never logged as NaN
