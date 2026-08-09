@@ -18,12 +18,39 @@ Standalone use (defaults mirror train.py):
 import argparse
 import multiprocessing as mp
 import pathlib
+import signal
 import sys
+import time
 
 import numpy as np
 
 from dreamerv3.tools import add_to_cache, convert, save_episodes
 from envs.board import smart_placement
+
+
+def _expert_plan(inner, budget_s=240):
+    """smart_placement under a hard wall-clock cap. Repair inside
+    smart_placement is already time-capped; this SIGALRM guard is the
+    backstop for any other pathological board so one episode can never
+    wedge a whole demo run. On expiry, fall back to the instant
+    no-election heuristic."""
+    if not hasattr(signal, "SIGALRM"):
+        return smart_placement(inner.board, inner.num_traces)
+
+    def _timeout(signum, frame):
+        raise TimeoutError
+
+    old = signal.signal(signal.SIGALRM, _timeout)
+    signal.alarm(int(budget_s))
+    try:
+        return smart_placement(inner.board, inner.num_traces)
+    except TimeoutError:
+        print(f"  demo board exceeded the {budget_s}s planning budget; "
+              f"using no-election placement", flush=True)
+        return smart_placement(inner.board, inner.num_traces, elect=False)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)
 
 
 def _expert_action(inner, target):
@@ -68,7 +95,7 @@ def _collect_range(directory, env_fn, start_offset, count, verbose=True):
         first["discount"] = 1.0
         add_to_cache(cache, env.id, first)
 
-        plan = smart_placement(inner.board, inner.num_traces)
+        plan = _expert_plan(inner)
         done, step_i, ep_return = False, 0, 0.0
         while not done:
             target = plan[step_i] if step_i < len(plan) else None
@@ -136,14 +163,24 @@ def collect_demos(directory, env_fn, episodes, verbose=True, workers=1):
     sizes = [todo // workers + (1 if i < todo % workers else 0)
              for i in range(workers)]
     procs, lo = [], 0
-    for i, n in enumerate(sizes):
+    for n in sizes:
         if n == 0:
             continue
         procs.append(ctx.Process(
             target=_collect_range,
-            args=(directory, env_fn, existing + lo, n, verbose and i == 0)))
+            args=(directory, env_fn, existing + lo, n, False)))
         procs[-1].start()
         lo += n
+    # Workers are silent; the parent reports GLOBAL progress (a single
+    # worker's slice count reads as 8x slower than reality).
+    t_last = time.monotonic()
+    while any(p.is_alive() for p in procs):
+        time.sleep(2)
+        if verbose and time.monotonic() - t_last >= 30:
+            t_last = time.monotonic()
+            done_now = len(list(directory.glob("*.npz"))) - existing
+            print(f"  demos: {done_now}/{todo} generated "
+                  f"({len(procs)} workers)", flush=True)
     for p in procs:
         p.join()
     made = len(list(directory.glob("*.npz"))) - existing

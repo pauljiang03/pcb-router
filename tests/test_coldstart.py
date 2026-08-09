@@ -135,6 +135,19 @@ def test_demo_collection_parallel(tmp_path):
     assert collect_demos(tmp_path, env_fn, 4, verbose=False, workers=2) == 0
 
 
+def test_repair_placement_time_budget():
+    import time
+    from envs.board import (load_te_example, generate_candidate_grid,
+                            repair_placement)
+    board = load_te_example(num_traces=6, seed=0)
+    cand, rc = generate_candidate_grid(board, 6.5)
+    placed = [tuple(cand[i]) for i in range(6)]  # clustered, surely broken
+    t0 = time.monotonic()
+    out = repair_placement(board, placed, time_budget=0.0)
+    assert out == placed                    # zero budget: no moves attempted
+    assert time.monotonic() - t0 < 5.0      # and no routing performed
+
+
 def test_expert_action_maps_to_valid_candidates():
     from demos import _expert_action
     env = TPPlacementEnv(num_traces=4, seed=3)

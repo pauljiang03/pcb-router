@@ -338,10 +338,24 @@ def wire_estimate(board: BoardSpec, pin, pad) -> float:
 
 def repair_placement(board: BoardSpec, placed, rounds: int = 2,
                      k_alt: int = 12, verbose: bool = False,
-                     objective: str = "fails"):
-    """Relocate problem-net pads to nearby legal spots, keeping moves that improve the objective."""
+                     objective: str = "fails", time_budget: float = None):
+    """Relocate problem-net pads to nearby legal spots, keeping moves that improve the objective.
+
+    time_budget (seconds) caps the search: every accepted/rejected move costs a
+    full trial routing (plus length equalization for objective="matched"), and
+    the unbounded worst case is rounds*nets*k_alt trials -- 40+ minutes on a
+    hard 20-trace board. On expiry the best placement found so far is returned.
+    """
+    import time
     from envs.routing import route_all_traces, equalize_lengths
     placed = list(placed)
+    t0 = time.monotonic()
+
+    def out_of_time():
+        return time_budget is not None and time.monotonic() - t0 >= time_budget
+
+    if out_of_time():
+        return placed
     cand, rc = generate_candidate_grid(board, 6.5)
     cand = cand[:rc]
     fast = dict(n_starts=1, max_iters=12, repair_passes=1)
@@ -368,6 +382,8 @@ def repair_placement(board: BoardSpec, placed, rounds: int = 2,
             problem = [j for j in range(len(placed)) if paths[j] is None]
         improved = False
         for i in problem:
+            if out_of_time():
+                return placed
             others = [placed[j] for j in range(len(placed))
                       if j != i and placed[j] is not None]
             d = np.hypot(cand[:, 0] - placed[i][0], cand[:, 1] - placed[i][1])
@@ -381,6 +397,8 @@ def repair_placement(board: BoardSpec, placed, rounds: int = 2,
                 if not all(np.hypot(p[0] - q[0], p[1] - q[1]) >= TP_TO_TP_MIN
                            for q in others):
                     continue
+                if out_of_time():
+                    return placed
                 tried += 1
                 old = placed[i]
                 placed[i] = p
@@ -413,8 +431,10 @@ def smart_placement(board: BoardSpec, num_traces: int, elect: bool = True,
         paths, lengths, fails = route_all_traces(
             board, placed, n_starts=1, max_iters=12, repair_passes=1)
         if 0 < fails <= 3:
-            # Repair near-miss candidates before judging.
-            placed = repair_placement(board, placed, verbose=verbose)
+            # Repair near-miss candidates before judging (time-capped: repair
+            # cost explodes on pathological boards and this runs per set).
+            placed = repair_placement(board, placed, verbose=verbose,
+                                      time_budget=30.0)
             paths, lengths, fails = route_all_traces(
                 board, placed, n_starts=1, max_iters=12, repair_passes=1)
         _eq, _eqL, _t, matched = equalize_lengths(
@@ -432,8 +452,10 @@ def smart_placement(board: BoardSpec, num_traces: int, elect: bool = True,
         print(f"  smart_placement elected: {best_name}")
     if best_key[0] == 0 and best_key[1] > 0:
         # Fix unmatched nets without trading away a routing success.
+        # "matched" trials also equalize lengths per move, so uncapped this is
+        # the 40-minute freeze on hard boards.
         best = repair_placement(board, best, objective="matched",
-                                verbose=verbose)
+                                verbose=verbose, time_budget=30.0)
     return best
 
 
