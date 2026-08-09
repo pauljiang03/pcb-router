@@ -2,6 +2,7 @@
 collection, fixed-fraction demo mixing, and the behavior-cloning actor loss."""
 import argparse
 import pathlib
+import sys
 
 import numpy as np
 import pytest
@@ -115,6 +116,23 @@ def test_demo_collection_roundtrip(tmp_path):
 
     # Resumable: a second call with the same target generates nothing new.
     assert collect_demos(tmp_path, env_fn, 1, verbose=False) == 0
+
+
+@pytest.mark.skipif(sys.platform != "linux",
+                    reason="fork-based parallel demo collection is Linux-only")
+def test_demo_collection_parallel(tmp_path):
+    from demos import collect_demos
+    from train import make_env
+
+    def env_fn(offset):
+        return make_env("demo", 0, seed=300 + offset, num_traces=4,
+                        reward_mode="layer_aware", boards="central")
+
+    made = collect_demos(tmp_path, env_fn, 4, verbose=False, workers=2)
+    assert made == 4
+    assert len(list(pathlib.Path(tmp_path).glob("*.npz"))) == 4
+    # Workers cover disjoint seed slices; resume sees the full set.
+    assert collect_demos(tmp_path, env_fn, 4, verbose=False, workers=2) == 0
 
 
 def test_expert_action_maps_to_valid_candidates():

@@ -16,7 +16,9 @@ Standalone use (defaults mirror train.py):
 """
 
 import argparse
+import multiprocessing as mp
 import pathlib
+import sys
 
 import numpy as np
 
@@ -50,31 +52,15 @@ def _expert_action(inner, target):
     return int(pool[int(np.argmin(d))])
 
 
-def collect_demos(directory, env_fn, episodes, verbose=True):
-    """Ensure `episodes` expert episodes exist in `directory`.
-
-    env_fn(seed_offset) -> a train.make_env-style wrapped env (OneHotAction ->
-    TimeLimit -> SelectAction -> UUID over PCBDreamerEnv). Returns the number
-    of episodes generated on this call.
-    """
-    directory = pathlib.Path(directory).expanduser()
-    directory.mkdir(parents=True, exist_ok=True)
-    existing = len(list(directory.glob("*.npz")))
-    todo = max(0, int(episodes) - existing)
-    if todo == 0:
-        if verbose and episodes:
-            print(f"Demos: {existing} episodes already in {directory}")
-        return 0
-    if verbose:
-        print(f"Demos: generating {todo} expert episodes "
-              f"({existing} already in {directory})...")
-
-    env = env_fn(existing)  # continue the board-seed stream on resume
+def _collect_range(directory, env_fn, start_offset, count, verbose=True):
+    """Roll `count` expert episodes at seed offsets [start_offset, +count)."""
+    directory = pathlib.Path(directory)
+    env = env_fn(start_offset)  # env's board seed advances once per reset
     num_actions = env.action_space.shape[0]
     inner = env._inner  # underlying TPPlacementEnv (wrappers delegate reads)
 
     returns, failures = [], []
-    for ep in range(todo):
+    for ep in range(count):
         obs = env.reset()
         cache = {}
         first = {k: convert(v) for k, v in obs.items()}
@@ -103,15 +89,71 @@ def collect_demos(directory, env_fn, episodes, verbose=True):
         save_episodes(directory, {env.id: cache[env.id]})
         returns.append(ep_return)
         failures.append(int(info.get("failures", 0)))
-        if verbose and ((ep + 1) % 10 == 0 or ep + 1 == todo):
-            print(f"  demo {existing + ep + 1}/{episodes}: "
-                  f"return={np.mean(returns):.2f} "
-                  f"failures={np.mean(failures):.2f} (running mean)")
+        if verbose and ((ep + 1) % 10 == 0 or ep + 1 == count):
+            print(f"  demos[{start_offset}..{start_offset + count - 1}]: "
+                  f"{ep + 1}/{count} return={np.mean(returns):.2f} "
+                  f"failures={np.mean(failures):.2f} (running mean)",
+                  flush=True)
     try:
         env.close()
     except Exception:
         pass
-    return todo
+    return count
+
+
+def collect_demos(directory, env_fn, episodes, verbose=True, workers=1):
+    """Ensure `episodes` expert episodes exist in `directory`.
+
+    env_fn(seed_offset) -> a train.make_env-style wrapped env (OneHotAction ->
+    TimeLimit -> SelectAction -> UUID over PCBDreamerEnv). Returns the number
+    of episodes generated on this call.
+
+    workers > 1 forks that many processes over contiguous seed-offset slices
+    (episodes are independent; ~30s each on hard 20-trace moat boards, so
+    serial generation of 200 takes over an hour while 8 workers need ~15
+    min). Fork-only: on non-Linux platforms this falls back to serial.
+    """
+    directory = pathlib.Path(directory).expanduser()
+    directory.mkdir(parents=True, exist_ok=True)
+    existing = len(list(directory.glob("*.npz")))
+    todo = max(0, int(episodes) - existing)
+    if todo == 0:
+        if verbose and episodes:
+            print(f"Demos: {existing} episodes already in {directory}")
+        return 0
+    workers = max(1, min(int(workers or 1), todo))
+    if sys.platform != "linux":
+        workers = 1  # closures don't survive spawn; fork is Linux-only here
+    if verbose:
+        print(f"Demos: generating {todo} expert episodes "
+              f"({existing} already in {directory}, "
+              f"{workers} worker{'s' if workers > 1 else ''})...")
+
+    if workers == 1:
+        return _collect_range(directory, env_fn, existing, todo, verbose)
+
+    ctx = mp.get_context("fork")  # children only run numpy/env code, no torch
+    sizes = [todo // workers + (1 if i < todo % workers else 0)
+             for i in range(workers)]
+    procs, lo = [], 0
+    for i, n in enumerate(sizes):
+        if n == 0:
+            continue
+        procs.append(ctx.Process(
+            target=_collect_range,
+            args=(directory, env_fn, existing + lo, n, verbose and i == 0)))
+        procs[-1].start()
+        lo += n
+    for p in procs:
+        p.join()
+    made = len(list(directory.glob("*.npz"))) - existing
+    if any(p.exitcode != 0 for p in procs) or made < todo:
+        raise RuntimeError(
+            f"demo workers produced {made}/{todo} episodes "
+            f"(exit codes {[p.exitcode for p in procs]})")
+    if verbose:
+        print(f"Demos: {made} episodes from {len(procs)} workers -> {directory}")
+    return made
 
 
 def main():
@@ -124,6 +166,9 @@ def main():
                         choices=["layer_aware", "single_layer"])
     parser.add_argument("--boards", type=str, default="mixed",
                         choices=["mixed", "central"])
+    parser.add_argument("--workers", type=int, default=None,
+                        help="Parallel generator processes "
+                             "(default: min(8, cpus-2); Linux only)")
     args = parser.parse_args()
 
     from train import make_env, DEMO_SEED_OFFSET  # lazy: avoids a cycle
@@ -132,8 +177,10 @@ def main():
         return make_env("demo", 0, args.seed + DEMO_SEED_OFFSET + offset,
                         args.num_traces, args.reward_mode, boards=args.boards)
 
+    import os
+    workers = args.workers or max(1, min(8, (os.cpu_count() or 2) - 2))
     collect_demos(pathlib.Path(args.logdir).expanduser() / "demo_eps",
-                  env_fn, args.episodes)
+                  env_fn, args.episodes, workers=workers)
 
 
 if __name__ == "__main__":

@@ -133,6 +133,10 @@ def main():
                              "the terminal reward across steps (totals "
                              "unchanged); 'none' is the legacy terminal-only "
                              "reward.")
+    parser.add_argument("--demo_workers", type=int, default=None,
+                        help="Parallel demo-generation processes (default: "
+                             "min(8, cpus-2); Linux only, serial elsewhere). "
+                             "Hard 20-trace boards cost ~30s each serially.")
     args = parser.parse_args()
 
     config_path = pathlib.Path(__file__).parent / "configs.yaml"
@@ -222,7 +226,10 @@ def main():
                             args.num_traces, args.reward_mode,
                             boards=args.boards, shaping=args.shaping)
 
-        collect_demos(demodir, demo_env_fn, demo_episodes)
+        demo_workers = args.demo_workers or max(
+            1, min(8, (os.cpu_count() or 2) - 2))
+        collect_demos(demodir, demo_env_fn, demo_episodes,
+                      workers=demo_workers)
         demo_eps = tools.load_episodes(demodir)
 
     state = None
