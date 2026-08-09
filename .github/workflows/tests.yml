@@ -18,7 +18,7 @@ jobs:
       - name: Install dependencies (CPU torch)
         run: |
           python -m pip install --upgrade pip
-          pip install numpy gymnasium openpyxl tensorboard pytest
+          pip install numpy gymnasium openpyxl tensorboard pytest "ruamel.yaml"
           pip install torch --index-url https://download.pytorch.org/whl/cpu
       - name: Run test suite
         run: python -m pytest tests/ -q
