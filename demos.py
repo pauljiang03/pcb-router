@@ -189,7 +189,19 @@ def collect_demos(directory, env_fn, episodes, verbose=True, workers=1):
             f"demo workers produced {made}/{todo} episodes "
             f"(exit codes {[p.exitcode for p in procs]})")
     if verbose:
+        # Workers are silent in the parallel path, so read the stats back:
+        # the mean return here is the BASELINE ANCHOR eval must reach.
+        rets, clean, total = [], 0, 0
+        for f in directory.glob("*.npz"):
+            ep = np.load(f)
+            rets.append(float(ep["reward"].sum()))
+            total += 1
+            if "log_routable" in ep:
+                clean += float(ep["log_routable"].sum()) == 10.0
         print(f"Demos: {made} episodes from {len(procs)} workers -> {directory}")
+        print(f"  demo anchor: return mean {np.mean(rets):.1f} "
+              f"(min {np.min(rets):.1f}, max {np.max(rets):.1f}); "
+              f"{clean}/{total} routed 20/20 planar")
     return made
 
 
