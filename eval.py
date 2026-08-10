@@ -207,19 +207,9 @@ def run_dreamer_policy(checkpoint, boards, num_traces, board_seed=None,
 
     # Identical wrapper stack to train.py; board_seed=None pins the fixed board.
     if board == "canonical":
-        from envs.board import load_te_excel, shift_cluster
-        if board_seed is None:
-            factory = lambda s: load_te_excel()
-        else:
-            def factory(s):
-                # Mirror the training distribution: 25% exact board, else
-                # up-only jitter (downward shifts are heuristically unsolvable).
-                rng = np.random.RandomState(s)
-                if rng.rand() < 0.25:
-                    return load_te_excel()
-                return shift_cluster(load_te_excel(),
-                                     float(rng.uniform(-3.0, 3.0)),
-                                     float(rng.uniform(0.0, 3.0)))
+        # STATIC target: always the exact xlsx board (board_seed irrelevant).
+        from envs.board import load_te_excel
+        factory = lambda s: load_te_excel()
     else:
         factory = None if board_seed is not None else (
             lambda s: load_te_example(num_traces=num_traces))
@@ -292,9 +282,8 @@ def main():
                         choices=["te", "canonical"],
                         help="'te' = synthetic TE-style board "
                              "(load_te_example); 'canonical' = the REAL "
-                             "AutoLayout Example01 board from the xlsx. With "
-                             "--board_seed, canonical episodes get the same "
-                             "cluster jitter used in training.")
+                             "AutoLayout Example01 board from the xlsx, "
+                             "always the exact static geometry.")
     args = parser.parse_args()
 
     router_name = "FreeRouting" if args.freerouting else "A*"
@@ -316,14 +305,9 @@ def main():
     # One board (+ candidate grid) per episode, shared by every method.
     def make_board(ep):
         if args.board == "canonical":
-            from envs.board import load_te_excel, shift_cluster
+            # STATIC target: always the exact xlsx board.
+            from envs.board import load_te_excel
             board = load_te_excel()
-            if args.board_seed is not None:
-                rng = np.random.RandomState(args.board_seed + ep)
-                if rng.rand() >= 0.25:  # mirror the training mixture
-                    board = shift_cluster(board,
-                                          float(rng.uniform(-3.0, 3.0)),
-                                          float(rng.uniform(0.0, 3.0)))
         else:
             seed = None if args.board_seed is None else args.board_seed + ep
             board = load_te_example(num_traces=args.num_traces, seed=seed)

@@ -77,15 +77,24 @@ def mixed_board_factory(num_traces):
 
 
 def canonical_board_factory(num_traces):
-    """Per-episode: the REAL TE AutoLayout Example01 board (from the xlsx).
+    """STATIC: the REAL TE AutoLayout Example01 board (xlsx), the exact
+    scoreboard geometry, every single episode. The goal is single-instance
+    optimization -- on a fixed board, learning the best action sequence IS
+    the deliverable, so anti-memorization jitter only starves the target
+    (observed: a full jittered-family run dropped one net on the exact board
+    it never practiced). canonical_family keeps the jittered variant."""
+    from envs.board import load_te_excel
 
-    25% of episodes use the EXACT unjittered board: it is the scoreboard
-    target AND the hardest family member (dy=0 is the boundary of the
-    up-only jitter -- observed: an eval checkpoint dropped a net there while
-    clean on lifted variants). The rest get a small seeded cluster jitter
-    for anti-memorization variety. Vertical jitter is UP-only: a solvability
-    sweep showed every downward shift leaves smart_placement 1-2 unroutable
-    nets while every upward shift stays 20/20 planar-solvable."""
+    def factory(seed):
+        return load_te_excel()
+
+    return factory
+
+
+def canonical_family_factory(num_traces):
+    """Jittered canonical family (25% exact board, rest up-only cluster
+    shifts; downward shifts are heuristically unsolvable). Kept for
+    robustness experiments."""
     from envs.board import load_te_excel, shift_cluster
 
     def factory(seed):
@@ -106,6 +115,8 @@ def make_env(mode, env_id, seed=0, num_traces=8, reward_mode="layer_aware",
         factory = mixed_board_factory(num_traces)
     elif boards == "canonical":
         factory = canonical_board_factory(num_traces)
+    elif boards == "canonical_family":
+        factory = canonical_family_factory(num_traces)
     else:  # "central": synthetic TE-style board family (load_te_example)
         factory = None
     # Space workers 10k seeds apart; +env_id would replay ~the same board stream.
@@ -144,13 +155,16 @@ def main():
     parser.add_argument("--reward_mode", type=str, default="single_layer",
                         choices=["layer_aware", "single_layer"])
     parser.add_argument("--boards", type=str, default="mixed",
-                        choices=["mixed", "central", "canonical"],
+                        choices=["mixed", "central", "canonical",
+                                 "canonical_family"],
                         help="Training board distribution: 'mixed' = synthetic "
                              "TE-style + moat challenge boards 50/50; "
                              "'central' = synthetic TE-style board only; "
                              "'canonical' = the REAL AutoLayout Example01 "
-                             "board (xlsx, 135x90mm) with small cluster "
-                             "jitter.")
+                             "board (xlsx, 135x90mm), STATIC -- the exact "
+                             "scoreboard geometry every episode; "
+                             "'canonical_family' = same board with small "
+                             "cluster jitter (25% exact).")
     parser.add_argument("--demos", type=int, default=None,
                         help="Expert (smart_placement) episodes to keep in "
                              "<logdir>/demo_eps for the cold start (overrides "

@@ -137,32 +137,38 @@ def test_demo_collection_parallel(tmp_path):
     assert collect_demos(tmp_path, env_fn, 4, verbose=False, workers=2) == 0
 
 
-def test_canonical_board_factory():
+def test_canonical_board_factory_is_static():
     from train import canonical_board_factory
     from envs.board import generate_candidate_grid, load_te_excel
 
     f = canonical_board_factory(20)
-    a, b, a2 = f(1), f(2), f(1)
-    pa = np.array([(t.start_x, t.start_y) for t in a.traces])
-    pb = np.array([(t.start_x, t.start_y) for t in b.traces])
-    pa2 = np.array([(t.start_x, t.start_y) for t in a2.traces])
-    assert len(a.traces) == 20
-    assert np.allclose(pa, pa2)              # deterministic per seed
-    assert not np.allclose(pa, pb)           # jitter varies across seeds
-    assert np.abs(pa - pb).max() <= 6.0 + 1e-6   # bounded shift
-    # ~25% of episodes must be the EXACT unjittered board (scoreboard target).
     base_pins = np.array([(t.start_x, t.start_y)
                           for t in load_te_excel().traces])
-    hits = sum(np.allclose(np.array([(t.start_x, t.start_y)
-                                     for t in f(s).traces]), base_pins)
-               for s in range(40))
-    assert 3 <= hits <= 20, hits
-    # The jittered board still yields a workable candidate grid.
-    _cand, real = generate_candidate_grid(a, 6.5)
-    assert real >= 60
-    # Cluster shift moved obstacles with the pins (rigid translation).
+    for s in (0, 1, 7, 12345):
+        pins = np.array([(t.start_x, t.start_y) for t in f(s).traces])
+        assert len(pins) == 20
+        assert np.allclose(pins, base_pins)  # the EXACT board, every episode
+    _cand, real = generate_candidate_grid(f(0), 6.5)
+    assert real >= 100
+
+
+def test_canonical_family_factory_mixture():
+    from train import canonical_family_factory
+    from envs.board import load_te_excel
+
+    f = canonical_family_factory(20)
     base = load_te_excel()
-    d_pin = pa[0] - np.array([base.traces[0].start_x, base.traces[0].start_y])
+    base_pins = np.array([(t.start_x, t.start_y) for t in base.traces])
+    pins = lambda b: np.array([(t.start_x, t.start_y) for t in b.traces])
+    a, b2, a2 = f(1), f(2), f(1)
+    assert np.allclose(pins(a), pins(a2))            # deterministic per seed
+    assert not np.allclose(pins(a), pins(b2))        # varies across seeds
+    assert np.abs(pins(a) - pins(b2)).max() <= 6.0 + 1e-6
+    # ~25% exact-board episodes.
+    hits = sum(np.allclose(pins(f(s)), base_pins) for s in range(40))
+    assert 3 <= hits <= 20, hits
+    # Cluster shift moves obstacles with the pins (rigid translation).
+    d_pin = pins(a)[0] - base_pins[0]
     d_obs = np.array([a.rect_obstacles[0].cx - base.rect_obstacles[0].cx,
                       a.rect_obstacles[0].cy - base.rect_obstacles[0].cy])
     assert np.allclose(d_pin, d_obs, atol=1e-9)
