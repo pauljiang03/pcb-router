@@ -182,7 +182,8 @@ def run_smart_baseline(boards, num_traces, use_freerouting=False, route_kw=None)
 
 def run_dreamer_policy(checkpoint, boards, num_traces, board_seed=None,
                        configs=("defaults",), device="cpu",
-                       use_freerouting=False, log_dir=None, route_kw=None):
+                       use_freerouting=False, log_dir=None, route_kw=None,
+                       board="te"):
     """Roll a trained Dreamer policy on the same boards and score with the same router as the baselines."""
     import torch
     import ruamel.yaml as yaml
@@ -204,9 +205,20 @@ def run_dreamer_policy(checkpoint, boards, num_traces, board_seed=None,
         device = "cpu"
     cfg["device"] = device
 
-    # Identical wrapper stack to train.py; board_seed=None pins the fixed TE board.
-    factory = None if board_seed is not None else (
-        lambda s: load_te_example(num_traces=num_traces))
+    # Identical wrapper stack to train.py; board_seed=None pins the fixed board.
+    if board == "canonical":
+        from envs.board import load_te_excel, shift_cluster
+        if board_seed is None:
+            factory = lambda s: load_te_excel()
+        else:
+            def factory(s):
+                rng = np.random.RandomState(s)
+                return shift_cluster(load_te_excel(),
+                                     float(rng.uniform(-3.0, 3.0)),
+                                     float(rng.uniform(-3.0, 3.0)))
+    else:
+        factory = None if board_seed is not None else (
+            lambda s: load_te_example(num_traces=num_traces))
     denv = PCBDreamerEnv(num_traces=num_traces, seed=board_seed or 0,
                          board_factory=factory)
     env = wrappers.OneHotAction(denv)
@@ -272,6 +284,13 @@ def main():
                              "instead of the quality budget. 10-30x faster on "
                              "unroutable placements; failure counts can come "
                              "out slightly higher.")
+    parser.add_argument("--board", type=str, default="te",
+                        choices=["te", "canonical"],
+                        help="'te' = synthetic TE-style board "
+                             "(load_te_example); 'canonical' = the REAL "
+                             "AutoLayout Example01 board from the xlsx. With "
+                             "--board_seed, canonical episodes get the same "
+                             "cluster jitter used in training.")
     args = parser.parse_args()
 
     router_name = "FreeRouting" if args.freerouting else "A*"
@@ -292,15 +311,27 @@ def main():
 
     # One board (+ candidate grid) per episode, shared by every method.
     def make_board(ep):
-        seed = None if args.board_seed is None else args.board_seed + ep
-        board = load_te_example(num_traces=args.num_traces, seed=seed)
+        if args.board == "canonical":
+            from envs.board import load_te_excel, shift_cluster
+            board = load_te_excel()
+            if args.board_seed is not None:
+                rng = np.random.RandomState(args.board_seed + ep)
+                board = shift_cluster(board,
+                                      float(rng.uniform(-3.0, 3.0)),
+                                      float(rng.uniform(-3.0, 3.0)))
+        else:
+            seed = None if args.board_seed is None else args.board_seed + ep
+            board = load_te_example(num_traces=args.num_traces, seed=seed)
         candidates, real_count = generate_candidate_grid(board, resolution=6.5)
         return board, candidates[:real_count]
 
     boards = [make_board(ep) for ep in range(args.episodes)]
     board0 = boards[0][0]
-    seed_note = ("fixed TE board" if args.board_seed is None
-                 else f"seeds {args.board_seed}..{args.board_seed + args.episodes - 1}")
+    board_name = ("canonical AutoLayout board" if args.board == "canonical"
+                  else "TE-style board")
+    seed_note = (f"fixed {board_name}" if args.board_seed is None
+                 else f"{board_name}, seeds {args.board_seed}.."
+                      f"{args.board_seed + args.episodes - 1}")
     print(f"Board: {board0.width}x{board0.height}mm, {len(board0.traces)} traces, "
           f"{len(boards[0][1])} candidates, router={router_name}, {seed_note}")
 
@@ -349,7 +380,8 @@ def main():
             args.checkpoint, boards, args.num_traces,
             board_seed=args.board_seed, configs=args.configs,
             device=args.device, use_freerouting=args.freerouting,
-            log_dir=str(outdir / "dreamer_eval_logs"), route_kw=route_kw)
+            log_dir=str(outdir / "dreamer_eval_logs"), route_kw=route_kw,
+            board=args.board)
         print(f"  [{time.perf_counter() - t0:.1f}s]")
         print_results("Dreamer", dreamer_results)
         tables.append(("Dreamer", dreamer_results))

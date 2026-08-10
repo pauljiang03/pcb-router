@@ -137,6 +137,30 @@ def test_demo_collection_parallel(tmp_path):
     assert collect_demos(tmp_path, env_fn, 4, verbose=False, workers=2) == 0
 
 
+def test_canonical_board_factory():
+    from train import canonical_board_factory
+    from envs.board import generate_candidate_grid, load_te_excel
+
+    f = canonical_board_factory(20)
+    a, b, a2 = f(1), f(2), f(1)
+    pa = np.array([(t.start_x, t.start_y) for t in a.traces])
+    pb = np.array([(t.start_x, t.start_y) for t in b.traces])
+    pa2 = np.array([(t.start_x, t.start_y) for t in a2.traces])
+    assert len(a.traces) == 20
+    assert np.allclose(pa, pa2)              # deterministic per seed
+    assert not np.allclose(pa, pb)           # jitter varies across seeds
+    assert np.abs(pa - pb).max() <= 6.0 + 1e-6   # bounded shift
+    # The jittered board still yields a workable candidate grid.
+    _cand, real = generate_candidate_grid(a, 6.5)
+    assert real >= 60
+    # Cluster shift moved obstacles with the pins (rigid translation).
+    base = load_te_excel()
+    d_pin = pa[0] - np.array([base.traces[0].start_x, base.traces[0].start_y])
+    d_obs = np.array([a.rect_obstacles[0].cx - base.rect_obstacles[0].cx,
+                      a.rect_obstacles[0].cy - base.rect_obstacles[0].cy])
+    assert np.allclose(d_pin, d_obs, atol=1e-9)
+
+
 def test_repair_placement_time_budget():
     import time
     from envs.board import (load_te_example, generate_candidate_grid,

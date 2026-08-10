@@ -277,6 +277,25 @@ def load_te_excel(path: Optional[str] = None, respace: bool = True,
     return board
 
 
+def shift_cluster(board: BoardSpec, dx: float, dy: float) -> BoardSpec:
+    """Translate the connector cluster (pins, obstacles, connector box) by
+    (dx, dy); the board outline stays put. Small seeded shifts give
+    per-episode variety on file-loaded boards -- the same anti-memorization
+    role load_te_example's seed plays for the synthetic board."""
+    for t in board.traces:
+        t.start_x += dx
+        t.start_y += dy
+    for o in board.rect_obstacles:
+        o.cx += dx
+        o.cy += dy
+    for o in board.circ_obstacles:
+        o.cx += dx
+        o.cy += dy
+    board.connector_x += dx
+    board.connector_y += dy
+    return board
+
+
 def _octd(ax, ay, bx, by):
     dx, dy = abs(ax - bx), abs(ay - by)
     return max(dx, dy) + 0.4142135624 * min(dx, dy)

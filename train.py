@@ -76,10 +76,29 @@ def mixed_board_factory(num_traces):
     return factory
 
 
+def canonical_board_factory(num_traces):
+    """Per-episode: the REAL TE AutoLayout Example01 board (from the xlsx),
+    with a small seeded cluster jitter for anti-memorization variety."""
+    from envs.board import load_te_excel, shift_cluster
+
+    def factory(seed):
+        rng = np.random.RandomState(seed)
+        return shift_cluster(load_te_excel(),
+                             float(rng.uniform(-3.0, 3.0)),
+                             float(rng.uniform(-3.0, 3.0)))
+
+    return factory
+
+
 def make_env(mode, env_id, seed=0, num_traces=8, reward_mode="layer_aware",
              route_n_starts=1, route_max_iters=12, boards="mixed",
              shaping="potential"):
-    factory = mixed_board_factory(num_traces) if boards == "mixed" else None
+    if boards == "mixed":
+        factory = mixed_board_factory(num_traces)
+    elif boards == "canonical":
+        factory = canonical_board_factory(num_traces)
+    else:  # "central": synthetic TE-style board family (load_te_example)
+        factory = None
     # Space workers 10k seeds apart; +env_id would replay ~the same board stream.
     env = PCBDreamerEnv(num_traces=num_traces, seed=seed + 10_000 * env_id,
                         reward_mode=reward_mode,
@@ -116,10 +135,13 @@ def main():
     parser.add_argument("--reward_mode", type=str, default="single_layer",
                         choices=["layer_aware", "single_layer"])
     parser.add_argument("--boards", type=str, default="mixed",
-                        choices=["mixed", "central"],
-                        help="Training board distribution: 'mixed' samples the "
-                             "central TE board and parametric moat challenge "
-                             "boards 50/50; 'central' uses only the TE board.")
+                        choices=["mixed", "central", "canonical"],
+                        help="Training board distribution: 'mixed' = synthetic "
+                             "TE-style + moat challenge boards 50/50; "
+                             "'central' = synthetic TE-style board only; "
+                             "'canonical' = the REAL AutoLayout Example01 "
+                             "board (xlsx, 135x90mm) with small cluster "
+                             "jitter.")
     parser.add_argument("--demos", type=int, default=None,
                         help="Expert (smart_placement) episodes to keep in "
                              "<logdir>/demo_eps for the cold start (overrides "
