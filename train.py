@@ -77,16 +77,21 @@ def mixed_board_factory(num_traces):
 
 
 def canonical_board_factory(num_traces):
-    """Per-episode: the REAL TE AutoLayout Example01 board (from the xlsx),
-    with a small seeded cluster jitter for anti-memorization variety.
+    """Per-episode: the REAL TE AutoLayout Example01 board (from the xlsx).
 
-    Vertical jitter is UP-only: the cluster sits low on the 90mm board, and a
-    solvability sweep showed every downward shift leaves smart_placement 1-2
-    unroutable nets while every upward shift stays 20/20 planar-solvable."""
+    25% of episodes use the EXACT unjittered board: it is the scoreboard
+    target AND the hardest family member (dy=0 is the boundary of the
+    up-only jitter -- observed: an eval checkpoint dropped a net there while
+    clean on lifted variants). The rest get a small seeded cluster jitter
+    for anti-memorization variety. Vertical jitter is UP-only: a solvability
+    sweep showed every downward shift leaves smart_placement 1-2 unroutable
+    nets while every upward shift stays 20/20 planar-solvable."""
     from envs.board import load_te_excel, shift_cluster
 
     def factory(seed):
         rng = np.random.RandomState(seed)
+        if rng.rand() < 0.25:
+            return load_te_excel()
         return shift_cluster(load_te_excel(),
                              float(rng.uniform(-3.0, 3.0)),
                              float(rng.uniform(0.0, 3.0)))

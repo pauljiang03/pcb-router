@@ -212,9 +212,11 @@ def run_dreamer_policy(checkpoint, boards, num_traces, board_seed=None,
             factory = lambda s: load_te_excel()
         else:
             def factory(s):
-                # Same jitter distribution as training (dy up-only: downward
-                # shifts make the board heuristically unsolvable).
+                # Mirror the training distribution: 25% exact board, else
+                # up-only jitter (downward shifts are heuristically unsolvable).
                 rng = np.random.RandomState(s)
+                if rng.rand() < 0.25:
+                    return load_te_excel()
                 return shift_cluster(load_te_excel(),
                                      float(rng.uniform(-3.0, 3.0)),
                                      float(rng.uniform(0.0, 3.0)))
@@ -318,9 +320,10 @@ def main():
             board = load_te_excel()
             if args.board_seed is not None:
                 rng = np.random.RandomState(args.board_seed + ep)
-                board = shift_cluster(board,
-                                      float(rng.uniform(-3.0, 3.0)),
-                                      float(rng.uniform(0.0, 3.0)))
+                if rng.rand() >= 0.25:  # mirror the training mixture
+                    board = shift_cluster(board,
+                                          float(rng.uniform(-3.0, 3.0)),
+                                          float(rng.uniform(0.0, 3.0)))
         else:
             seed = None if args.board_seed is None else args.board_seed + ep
             board = load_te_example(num_traces=args.num_traces, seed=seed)

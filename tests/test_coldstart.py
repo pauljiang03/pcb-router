@@ -150,6 +150,13 @@ def test_canonical_board_factory():
     assert np.allclose(pa, pa2)              # deterministic per seed
     assert not np.allclose(pa, pb)           # jitter varies across seeds
     assert np.abs(pa - pb).max() <= 6.0 + 1e-6   # bounded shift
+    # ~25% of episodes must be the EXACT unjittered board (scoreboard target).
+    base_pins = np.array([(t.start_x, t.start_y)
+                          for t in load_te_excel().traces])
+    hits = sum(np.allclose(np.array([(t.start_x, t.start_y)
+                                     for t in f(s).traces]), base_pins)
+               for s in range(40))
+    assert 3 <= hits <= 20, hits
     # The jittered board still yields a workable candidate grid.
     _cand, real = generate_candidate_grid(a, 6.5)
     assert real >= 60
