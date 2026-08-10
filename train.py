@@ -78,14 +78,18 @@ def mixed_board_factory(num_traces):
 
 def canonical_board_factory(num_traces):
     """Per-episode: the REAL TE AutoLayout Example01 board (from the xlsx),
-    with a small seeded cluster jitter for anti-memorization variety."""
+    with a small seeded cluster jitter for anti-memorization variety.
+
+    Vertical jitter is UP-only: the cluster sits low on the 90mm board, and a
+    solvability sweep showed every downward shift leaves smart_placement 1-2
+    unroutable nets while every upward shift stays 20/20 planar-solvable."""
     from envs.board import load_te_excel, shift_cluster
 
     def factory(seed):
         rng = np.random.RandomState(seed)
         return shift_cluster(load_te_excel(),
                              float(rng.uniform(-3.0, 3.0)),
-                             float(rng.uniform(-3.0, 3.0)))
+                             float(rng.uniform(0.0, 3.0)))
 
     return factory
 
