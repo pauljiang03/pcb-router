@@ -23,7 +23,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import numpy as np
 from envs.board import (load_te_excel, load_te_example, smart_placement,
                         generate_candidate_grid, check_tp_spacing)
-from envs.routing import route_all_traces
+from envs.routing import route_all_traces, equalize_lengths
 
 
 def main():
@@ -48,10 +48,22 @@ def main():
         fin = [x for x in lengths if x < 1e9]
         return fails, (max(fin) if fin else 1e9), (sum(fin) if fin else 1e9)
 
+    def fully_matched(placed):
+        """Route + serpentine-equalize: True iff every trace reaches the
+        padding target (the fixture requirement training only proxies)."""
+        paths, _L, fails = route_all_traces(board, placed, **fast)
+        if fails:
+            return False
+        _eqp, _eqL, _t, m = equalize_lengths(board, paths, test_points=placed)
+        return m == n
+
     best = list(smart_placement(board, n))
     bf, bmax, btot = score(best)
     print(f"start (smart): fails={bf} max={bmax:.1f} total={btot:.0f}",
           flush=True)
+    # Last max-improving placement verified to equalize 20/20; the saved
+    # answer never regresses below this.
+    best_matched = (list(best), bmax, btot) if fully_matched(best) else None
 
     rng = np.random.RandomState(a.seed)
     t_end = time.monotonic() + a.minutes * 60
@@ -80,28 +92,41 @@ def main():
         fails, m, tot = score(trial)
         if fails == 0 and (m < bmax - 1e-6
                            or (m < bmax + 1e-6 and tot < btot - 0.5)):
+            improved_max = m < bmax - 1e-6
             best, bmax, btot = trial, m, tot
             accepted += 1
-            print(f"  max={m:.1f} total={tot:.0f} (trial {trials})",
+            note = ""
+            if improved_max:  # gate max milestones on equalization fitting
+                if fully_matched(best):
+                    best_matched = (list(best), bmax, btot)
+                else:
+                    note = "  [not equalizable -- kept climbing, not saved]"
+            print(f"  max={m:.1f} total={tot:.0f} (trial {trials}){note}",
                   flush=True)
 
-    # Verify the final placement at the quality budget eval.py scores with,
-    # INCLUDING the serpentine equalization post-stage (the fixture pads
-    # every trace to the max, so a placement only counts if it equalizes).
+    # Final answer must equalize: if the last hill-climb state doesn't fit
+    # its meanders, fall back to the best max-milestone that did.
+    if not fully_matched(best):
+        if best_matched is not None:
+            print(f"final state not equalizable; reverting to last matched "
+                  f"milestone (max={best_matched[1]:.1f})")
+            best, bmax, btot = (list(best_matched[0]), best_matched[1],
+                                best_matched[2])
+        else:
+            print("WARNING: no fully-matched placement found; saving the "
+                  "best routed one anyway")
+
+    # Verify at the quality budget eval.py scores with, incl. equalization.
     paths, lengths, fails = route_all_traces(board, best)
     fin = [x for x in lengths if x < 1e9]
     qmax, qtot = (max(fin), sum(fin)) if fin else (1e9, 1e9)
     matched = 0
     if fails == 0:
-        from envs.routing import equalize_lengths
         _eqp, _eqL, _t, matched = equalize_lengths(board, paths,
                                                    test_points=best)
     print(f"\nbest (quality-budget verify): fails={fails} max={qmax:.1f} "
           f"total={qtot:.0f} matched={matched}/{n}  "
           f"[{trials} trials, {accepted} accepted]")
-    if fails == 0 and matched < n:
-        print("WARNING: not all traces reach the equalization target; "
-              "prefer a placement with matched == n")
 
     out = pathlib.Path(a.out)
     out.parent.mkdir(parents=True, exist_ok=True)

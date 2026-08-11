@@ -57,11 +57,12 @@ def evaluate_placement(board, placed_tps, use_freerouting=False, route_kw=None):
     spread = ((max(finite) - min(finite)) / np.mean(finite)
               if len(finite) > 1 else 0)
     # The fixture serpentine-pads every trace to the max (final wire =
-    # n * max); run that post-stage on fully-routed placements and report
-    # whether it succeeds. Raw routed spread above is only the feasibility
-    # margin -- eq_spread is the as-built number.
+    # n * max); run that post-stage on whatever routed -- baselines with
+    # failures equalize their routed subset -- and report whether it
+    # succeeds. Raw routed spread above is only the feasibility margin;
+    # eq_spread is the as-built number.
     eq_paths, matched, eq_spread = None, 0, None
-    if failures == 0 and finite:
+    if finite:
         try:
             eq_paths, eq_lengths, _target, matched = equalize_lengths(
                 board, paths, test_points=placed_tps)
@@ -346,9 +347,9 @@ def main():
             t2t = (f"{v['trace_to_trace_min']:.2f}"
                    if v['trace_to_trace_min'] < float('inf') else "n/a")
             eq_note = ""
-            if r["failures"] == 0:
-                n_tr = len(r["lengths"])
-                eq_note = (f", matched={r['matched']}/{n_tr}"
+            if r.get("eq_paths") is not None:
+                routed_n = sum(1 for l in r["lengths"] if l < float('inf'))
+                eq_note = (f", matched={r['matched']}/{routed_n}"
                            + (f", eq_spread={r['eq_spread']:.3f}"
                               if r["eq_spread"] is not None else ""))
             print(f"  Ep {i + 1}: failures={r['failures']}, "
