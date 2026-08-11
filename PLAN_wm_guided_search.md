@@ -1,7 +1,11 @@
 # Plan: World-Model-Guided Placement Search
 
-Status: PLANNED, not implemented. This document is self-contained — written for
-a session with no prior context. Evaluate critically before implementing.
+Status: IMPLEMENTED 2026-08-10 (`scripts/wm_guided_search.py`,
+`tests/test_wm_search.py`, notebook cells). Every code-level claim below was
+verified against the repo before implementing; four corrections were applied —
+see "Implementation notes" at the end. Remaining step: the user runs the
+Colab cell against the v4 static checkpoint and reads the results against the
+decision rules.
 
 ## Goal
 
@@ -185,10 +189,36 @@ max_mm, total_mm, matched) so `train.py --demo_placement` can distill it.
 
 ## Deliverables checklist
 
-- [ ] `scripts/wm_guided_search.py` per spec
-- [ ] obs-builder equality unit test (CI-safe, no checkpoint)
-- [ ] local random-weights smoke run (~2 min) passes
-- [ ] notebook cell (markdown + code) added via NotebookEdit
-- [ ] pushed to main (Colab consumes GitHub)
+- [x] `scripts/wm_guided_search.py` per spec
+- [x] obs-builder equality unit test (CI-safe, no checkpoint) —
+      `tests/test_wm_search.py` (new file, not test_coldstart.py: it tests
+      the search script, not the cold-start pipeline); also covers mutation
+      validity and the manual Spearman
+- [x] local random-weights smoke run passes (fails=0 max=94.5 matched=20/20
+      final verify; fidelity ρ = nan under random weights because
+      reward_head outscale=0 zero-inits the output layer — expected)
+- [x] notebook cells (markdown `6a78da1c` + code `137a4e6c`, after the
+      distill cell) added via NotebookEdit
+- [x] pushed to main (Colab consumes GitHub)
 - [ ] user runs in Colab against the v4 static checkpoint; report fidelity ρ,
       guided-vs-blind table, and the matched-verified best placement JSON
+
+## Implementation notes (deviations from the spec above)
+
+1. `build_env` passes `reward_mode="single_layer"` explicitly —
+   `train.make_env`'s DEFAULT is `layer_aware`, which is NOT what the static
+   canonical checkpoint trained with; inheriting it would silently change the
+   true-return function and poison fidelity.
+2. Blind arm runs to `--blind_mult` × C (default 3, wall-clock capped by
+   `--blind_minutes`, default 3×`--minutes`) instead of stopping at C: the
+   ≥3× decision rule needs the 3C region observed, not extrapolated. Both
+   arms record best-vs-calls curves; the JSON reports blind@C and
+   `calls_to_match_guided` (0 = the shared seed already matched).
+3. The seed is `smart_placement` SNAPPED to the candidate grid
+   (spacing-aware greedy nearest-candidate) since smart coords are off-grid
+   and the model only ever saw grid placements; both arms start from the
+   same snapped seed and its score is reported (fast-budget: 94.5mm, not
+   95mm — the snap landed slightly better).
+4. Fidelity samples mutate at depths 1/2/4/8 (cycled) rather than depth-1
+   only, and additionally report Spearman(pred, −max) on the 0-failure
+   subset — the search objective, not just the shaped return.
