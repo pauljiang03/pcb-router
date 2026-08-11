@@ -108,9 +108,11 @@ class TPPlacementEnv(gym.Env):
         self._y_scale = (IMG_SIZE - 1) / max(self.board.height, 1e-6)
 
     def _w2p(self, x: float, y: float) -> Tuple[int, int]:
+        # min/max instead of np.clip: same values, no per-pixel numpy dispatch
+        # (this runs ~400x per render and dominated render time).
         px = int((x - self.board.x_min) * self._x_scale)
         py = int((y - self.board.y_min) * self._y_scale)
-        return np.clip(px, 0, IMG_SIZE - 1), np.clip(py, 0, IMG_SIZE - 1)
+        return min(max(px, 0), IMG_SIZE - 1), min(max(py, 0), IMG_SIZE - 1)
 
     def _draw_circle(self, img, cx, cy, r_mm, ch, val=255):
         pcx, pcy = self._w2p(cx, cy)

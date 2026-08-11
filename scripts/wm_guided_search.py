@@ -281,6 +281,11 @@ def fidelity_phase(args, env, wm, builder, device, seed_state, cand, real_count)
     samples = []
     print(f"\n[fidelity] {args.fidelity} samples, depths {depths} ...", flush=True)
     t0 = time.monotonic()
+    # Calibration anchor: the seed is the placement training saw most often.
+    seed_pred = float(surrogate_scores(wm, builder, [list(seed_state)], device)[0])
+    seed_true = replay_true_return(env, seed_state)
+    print(f"[fidelity] seed: pred={seed_pred:.2f} true={seed_true['return']:.2f}",
+          flush=True)
     states = []
     for k in range(args.fidelity):
         depth = depths[k % len(depths)]
@@ -299,7 +304,9 @@ def fidelity_phase(args, env, wm, builder, device, seed_state, cand, real_count)
         "n": len(samples),
         "spearman_return": spearman(pred_v, true_v),
         "pearson_return": pearson(pred_v, true_v),
-        "router_calls": len(samples),
+        "seed_pred": seed_pred,
+        "seed_true_return": seed_true["return"],
+        "router_calls": len(samples) + 1,
         "samples": samples,
     }
     # Also rank against the search objective (-max) on the routable subset.
@@ -327,7 +334,8 @@ def guided_arm(args, wm, builder, device, board, cand, real_count,
     best_matched = (list(best), bsc[1], bsc[2]) if seed_ok else None
     calls = matched_checks = iters = hits = scored = 0
     curve = [[0, bsc[1], bsc[2]]]
-    t_end = time.monotonic() + args.minutes * 60
+    t_start = time.monotonic()
+    t_end = t_start + args.minutes * 60
     print(f"\n[guided] budget {args.minutes} min, batch {args.batch}, "
           f"topk {args.topk}", flush=True)
     while time.monotonic() < t_end:
@@ -366,6 +374,7 @@ def guided_arm(args, wm, builder, device, board, cand, real_count,
              "accepted": hits,
              "hit_rate": (hits / max(calls, 1)),
              "matched_checks": matched_checks,
+             "seconds": round(time.monotonic() - t_start, 1),
              "best_max_mm": bsc[1], "best_total_mm": bsc[2], "curve": curve}
     return best, bsc, best_matched, stats
 
@@ -379,7 +388,8 @@ def blind_arm(args, board, cand, real_count, seed_state, seed_sc, seed_ok,
     best_matched = (list(best), bsc[1], bsc[2]) if seed_ok else None
     calls = matched_checks = hits = 0
     curve = [[0, bsc[1], bsc[2]]]
-    t_end = time.monotonic() + minutes_cap * 60
+    t_start = time.monotonic()
+    t_end = t_start + minutes_cap * 60
     print(f"\n[blind] cap {call_cap} router calls or {minutes_cap:.1f} min",
           flush=True)
     while calls < call_cap and time.monotonic() < t_end:
@@ -404,6 +414,7 @@ def blind_arm(args, board, cand, real_count, seed_state, seed_sc, seed_ok,
                   f"(call {calls}){note}", flush=True)
     stats = {"router_calls": calls, "call_cap": call_cap, "accepted": hits,
              "matched_checks": matched_checks,
+             "seconds": round(time.monotonic() - t_start, 1),
              "best_max_mm": bsc[1], "best_total_mm": bsc[2], "curve": curve}
     return best, bsc, best_matched, stats
 
@@ -443,6 +454,8 @@ def main():
     ap.add_argument("--out", default="eval_results/wm_search.json")
     args = ap.parse_args()
 
+    if args.checkpoint and not pathlib.Path(args.checkpoint).exists():
+        sys.exit(f"checkpoint not found: {args.checkpoint}")
     out = pathlib.Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
 
@@ -516,11 +529,13 @@ def main():
     if fid:
         print(f"fidelity: rho(return)={fid['spearman_return']:.3f}  "
               f"pearson={fid['pearson_return']:.3f}  "
-              f"rho(-max|0fail)={fid['spearman_neg_max_zero_fail']}")
-    print(f"guided : C={C} calls, best max={g_sc[1]:.1f} total={g_sc[2]:.0f}, "
+              f"rho(-max|0fail)={fid['spearman_neg_max_zero_fail']}  "
+              f"seed pred={fid['seed_pred']:.2f}/true={fid['seed_true_return']:.2f}")
+    print(f"guided : C={C} calls in {g_stats['seconds']:.0f}s, "
+          f"best max={g_sc[1]:.1f} total={g_sc[2]:.0f}, "
           f"hit_rate={g_stats['hit_rate']:.2f}")
     print(f"blind  : at C calls max={blind_at_C[1]:.1f}; "
-          f"ran to {b_stats['router_calls']} calls "
+          f"ran to {b_stats['router_calls']} calls in {b_stats['seconds']:.0f}s "
           f"(cap {call_cap}), final max={b_sc[1]:.1f}")
     print(f"blind calls to match guided's max: "
           f"{match_calls if match_calls is not None else 'not within cap'}")
