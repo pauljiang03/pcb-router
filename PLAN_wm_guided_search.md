@@ -2,7 +2,7 @@
 
 Status: IMPLEMENTED 2026-08-10 (`scripts/wm_guided_search.py`,
 `tests/test_wm_search.py`, notebook cells). Every code-level claim below was
-verified against the repo before implementing; four corrections were applied —
+verified against the repo before implementing; four corrections were applied --
 see "Implementation notes" at the end. Remaining step: the user runs the
 Colab cell against the v4 static checkpoint and reads the results against the
 decision rules.
@@ -35,19 +35,19 @@ nothing else can.
   ≤30mm mutations, real router scores every trial, matched-gated milestones).
   A 200s ungated probe reached 86mm/1073mm; gated true optimum is TBD.
 - Trained checkpoint: the user's Colab Drive,
-  `/content/drive/MyDrive/pcb-router-logs-v4/canonical/latest.pt` — a 60k-step
+  `/content/drive/MyDrive/pcb-router-logs-v4/canonical/latest.pt` -- a 60k-step
   run on the static board (config `defaults colab_a100`, single_layer reward,
   shaping="potential", vector obs). Its policy exactly clones the smart
   solution. Its **world model** is sharp on this board (reward_loss ≈ 0.4,
   vector_loss ≈ 0.1) and its replay included 5k random-placement prefill
   steps, so the reward head has seen diverse placements, not just the clone.
-  There is no checkpoint on the local machine — real experiments run in Colab
-  (the user's notebook `pcb_router_colab-v3.ipynb` clones this repo from
+  There is no checkpoint on the local machine -- real experiments run in Colab
+  (the user's notebook `pcb_router_colab-v4.ipynb` clones this repo from
   GitHub main; local work must be pushed to be usable there).
 
 ## Core mechanism: scoring a placement WITHOUT the router
 
-Key insight: **every observation component is pure geometry** — the 64×64
+Key insight: **every observation component is pure geometry** -- the 64×64
 render, the valid-candidate mask, and the 443-dim vector depend only on the
 board and the TPs placed so far. Routing happens only in the terminal
 *reward*. So a full 21-row episode observation sequence for any candidate
@@ -56,7 +56,7 @@ placement can be built for ~free, fed through the world model's posterior
 episode return**. Because the training run used `shaping="potential"`,
 per-step rewards carry length/crossing signal and the terminal carries the
 routing outcome, so the summed prediction is a surrogate of the full shaped
-objective. No imagination rollouts needed — this is posterior scoring on real
+objective. No imagination rollouts needed -- this is posterior scoring on real
 observations.
 
 ### Episode-format conventions (MUST match training exactly)
@@ -92,7 +92,7 @@ pred = wm.heads["reward"](feat).mode()             # -> reshape (B, 21)
 scores = pred.reshape(B, 21).sum(-1)               # predicted returns
 ```
 
-Checkpoint loading recipe: mirror `eval.py:run_dreamer_policy` — yaml
+Checkpoint loading recipe: mirror `eval.py:run_dreamer_policy` -- yaml
 `defaults` (+`colab_a100`), `cfg["num_actions"]=200`,
 `torch.distributions.Distribution.set_default_validate_args(False)`,
 `Dreamer(env.observation_space, env.action_space, config, logger,
@@ -102,7 +102,7 @@ dataset=None)`, load `latest.pt` `agent_state_dict`, use `agent._wm`,
 ## Script spec: `scripts/wm_guided_search.py`
 
 Args: `--checkpoint` (required for real runs; if missing/empty, run with
-random weights and print a loud RANDOM-WEIGHTS warning — plumbing smoke only),
+random weights and print a loud RANDOM-WEIGHTS warning -- plumbing smoke only),
 `--configs defaults colab_a100`, `--device cuda:0` (fallback cpu),
 `--minutes 10` (guided-arm budget), `--batch 48` (mutations scored per
 iteration), `--topk 2` (real router calls per iteration), `--fidelity 32`
@@ -113,15 +113,15 @@ State is a list of 20 ACTION INDICES (coords = `candidates[idx]`); mutations
 mirror the blind optimizer: swap two, rotate three, or move one to a candidate
 within 30mm passing `check_tp_spacing` against the others.
 
-Phase 1 — **fidelity**: sample `--fidelity` random mutations of the smart
+Phase 1 -- **fidelity**: sample `--fidelity` random mutations of the smart
 placement; for each compute (a) the surrogate score and (b) the TRUE shaped
 return by replaying the action sequence through the real wrapped env
 (`env.step({"action": onehot})`, which routes at the terminal). Report
-Spearman (implement rank-correlation manually via ranks + Pearson — scipy is
+Spearman (implement rank-correlation manually via ranks + Pearson -- scipy is
 NOT a dependency) and Pearson. These router calls are bookkept separately from
 the search arms.
 
-Phase 2 — **guided arm**: per iteration, generate `--batch` mutations of the
+Phase 2 -- **guided arm**: per iteration, generate `--batch` mutations of the
 incumbent, score all with the surrogate in ONE batched forward, real-route
 only the `--topk` by predicted score (fast budget `n_starts=1, max_iters=12,
 repair_passes=1`), accept lexicographic improvements `(fails, max, total)`,
@@ -129,7 +129,7 @@ and gate max-milestones on full equalization exactly as
 `optimize_placement.py` does (`fully_matched` + fallback snapshot). Count
 router calls C.
 
-Phase 3 — **blind arm**: identical mutation generator and acceptance, but
+Phase 3 -- **blind arm**: identical mutation generator and acceptance, but
 route every mutation, capped at the SAME router-call budget C. Report both
 arms' best (max/total/matched) at equal calls; also report the surrogate's
 per-iteration hit rate (how often a top-k candidate was a true improvement).
@@ -143,34 +143,34 @@ max_mm, total_mm, matched) so `train.py --demo_placement` can distill it.
 1. **Unit test** (`tests/test_coldstart.py`, no checkpoint, CI-safe): build
    the obs sequence for a random valid action sequence with the manual
    builder, and separately roll the SAME actions through the real wrapped env
-   (small board OK — `boards="central"`, `num_traces=4`, routing at terminal
+   (small board OK -- `boards="central"`, `num_traces=4`, routing at terminal
    is fine in a test); assert image/mask/vector rows are exactly equal and
    flags match. This pins the format-alignment risk, which is the main way
    this feature silently breaks. Import via `from scripts.wm_guided_search
    import ...` (namespace package, conftest puts repo root on sys.path).
 2. **Local smoke** (no checkpoint): `--minutes 0.3 --fidelity 4` with random
-   weights — verifies plumbing end to end. Keep local runs to ~2-3 min; the
+   weights -- verifies plumbing end to end. Keep local runs to ~2-3 min; the
    user's machine is weak and real experiments belong in Colab.
-3. **Colab cell** (add to `pcb_router_colab-v3.ipynb` via NotebookEdit — the
+3. **Colab cell** (add to `pcb_router_colab-v4.ipynb` via NotebookEdit -- the
    file must be edited with NotebookEdit, and cell ids shift after
    insert/delete, so re-Read between structural edits): run with
-   `--checkpoint "{RUN_DIR}/latest.pt"` — but NOTE the user's static run dir
+   `--checkpoint "{RUN_DIR}/latest.pt"` -- but NOTE the user's static run dir
    is `pcb-router-logs-v4/canonical` while the current notebook RUN_DIR is
    `{LOGROOT}/canonical-static`; the cell should let the user point at
-   whichever checkpoint exists. Push to main first — Colab pulls from GitHub.
+   whichever checkpoint exists. Push to main first -- Colab pulls from GitHub.
 
 ## Decision rules for the results
 
 - Fidelity Spearman ρ ≥ 0.6: surrogate is genuinely informative; the speedup
   claim is expected to hold. 0.3–0.6: partial guidance, report honestly.
-  < 0.3: the reward head does not rank off-policy mutations — the honest
+  < 0.3: the reward head does not rank off-policy mutations -- the honest
   extension is fine-tuning the reward head on the blind optimizer's trial log
   (placement → true score pairs), which turns this into "learned surrogate
   from search data"; note it, don't silently ship a weak result.
 - Speedup: success = guided reaches the blind arm's equal-call quality with
   ≥3× headroom (i.e., blind needs ≥3C calls to match guided's best). If the
   surrogate is good but speedup is small, the mutation generator (not the
-  model) is the bottleneck — say so.
+  model) is the bottleneck -- say so.
 
 ## Known pitfalls (learned the hard way in this repo)
 
@@ -179,24 +179,24 @@ max_mm, total_mm, matched) so `train.py --demo_placement` can distill it.
 - `mp` fork paths are Linux-only (demo generation); nothing in this plan needs
   fork.
 - `generate_candidate_grid(board, res, max_candidates=BIG)` pads a Python list
-  to max_candidates — never pass a huge cap.
-- The reward head's `.mode()` may carry a trailing dim — reshape defensively.
-- eval.py memoizes `evaluate_placement` per (board, placement, budget) — not
+  to max_candidates -- never pass a huge cap.
+- The reward head's `.mode()` may carry a trailing dim -- reshape defensively.
+- eval.py memoizes `evaluate_placement` per (board, placement, budget) -- not
   used here, but don't be surprised by instant repeats.
-- CI installs a hand-picked pip list (see `.github/workflows/tests.yml`) — a
+- CI installs a hand-picked pip list (see `.github/workflows/tests.yml`) -- a
   new import needs adding there or must be optional.
 - Don't run anything heavy locally; push and run in Colab.
 
 ## Deliverables checklist
 
 - [x] `scripts/wm_guided_search.py` per spec
-- [x] obs-builder equality unit test (CI-safe, no checkpoint) —
+- [x] obs-builder equality unit test (CI-safe, no checkpoint) --
       `tests/test_wm_search.py` (new file, not test_coldstart.py: it tests
       the search script, not the cold-start pipeline); also covers mutation
       validity and the manual Spearman
 - [x] local random-weights smoke run passes (fails=0 max=94.5 matched=20/20
       final verify; fidelity ρ = nan under random weights because
-      reward_head outscale=0 zero-inits the output layer — expected)
+      reward_head outscale=0 zero-inits the output layer -- expected)
 - [x] notebook cells (markdown `6a78da1c` + code `137a4e6c`, after the
       distill cell) added via NotebookEdit
 - [x] pushed to main (Colab consumes GitHub)
@@ -205,7 +205,7 @@ max_mm, total_mm, matched) so `train.py --demo_placement` can distill it.
 
 ## Implementation notes (deviations from the spec above)
 
-1. `build_env` passes `reward_mode="single_layer"` explicitly —
+1. `build_env` passes `reward_mode="single_layer"` explicitly --
    `train.make_env`'s DEFAULT is `layer_aware`, which is NOT what the static
    canonical checkpoint trained with; inheriting it would silently change the
    true-return function and poison fidelity.
@@ -218,7 +218,7 @@ max_mm, total_mm, matched) so `train.py --demo_placement` can distill it.
    (spacing-aware greedy nearest-candidate) since smart coords are off-grid
    and the model only ever saw grid placements; both arms start from the
    same snapped seed and its score is reported (fast-budget: 94.5mm, not
-   95mm — the snap landed slightly better).
+   95mm -- the snap landed slightly better).
 4. Fidelity samples mutate at depths 1/2/4/8 (cycled) rather than depth-1
    only, and additionally report Spearman(pred, −max) on the 0-failure
-   subset — the search objective, not just the shaped return.
+   subset -- the search objective, not just the shaped return.

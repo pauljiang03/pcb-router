@@ -1,11 +1,6 @@
-"""Tests for scripts/wm_guided_search.py.
-
-The load-bearing one is obs-builder parity: the manually-built episode rows
-(no terminal routing) must EXACTLY equal what the real wrapped env emits for
-the same action sequence -- this is the main way world-model scoring could
-silently break (checkpoint-free, CI-safe; routing a 4-trace synthetic board
-at the terminal is cheap).
-"""
+"""Tests for scripts/wm_guided_search.py. The load-bearing one is obs-builder
+parity: manually-built episode rows must exactly equal what the real wrapped
+env emits for the same actions."""
 import numpy as np
 
 from envs.board import check_tp_spacing
@@ -19,9 +14,7 @@ def _make_env():
 
 
 def _greedy_valid_sequence(env):
-    """Deterministic prefix-valid action sequence: always the first
-    still-valid candidate. Drives the inner env's geometry state and restores
-    it, the same way the builder does."""
+    """First still-valid candidate at each step; restores env state after."""
     inner = env._inner
     saved = (list(inner.placed_tps), inner.current_trace,
              inner.candidate_mask.copy())
@@ -46,12 +39,11 @@ def test_obs_builder_matches_real_env_rows():
     seq = _greedy_valid_sequence(env)
 
     rows = builder.build(seq)
-    rows2 = builder.build(seq)  # state restore => builds are reproducible
+    rows2 = builder.build(seq)  # state restore makes builds reproducible
     for k in rows:
         assert np.array_equal(rows[k], rows2[k]), k
 
-    # Cache conventions (dreamerv3.tools.add_to_cache): zero action row 0,
-    # action[t] = one-hot that produced obs row t, terminal on the last row.
+    # Cache conventions: zero action row 0, action[t] produced obs row t.
     assert rows["image"].shape == (n + 1, 64, 64, 3)
     assert not rows["action"][0].any()
     for t, idx in enumerate(seq):
@@ -60,10 +52,8 @@ def test_obs_builder_matches_real_env_rows():
     assert rows["is_first"][0] and not rows["is_first"][1:].any()
     assert rows["is_terminal"][-1] and not rows["is_terminal"][:-1].any()
 
-    # Replay the SAME actions through the real wrapped env. No new reset:
-    # builder restored the post-reset state, and a reset would resample the
-    # central-family board. The terminal step routes -- the obs must still be
-    # pure geometry and match the router-free builder rows exactly.
+    # Replay through the real env. No new reset: builder restored the
+    # post-reset state, and a reset would resample the central-family board.
     real = [dict(image=builder._row0["image"], mask=builder._row0["mask"],
                  vector=builder._row0["vector"])]
     done = False
@@ -78,7 +68,6 @@ def test_obs_builder_matches_real_env_rows():
         assert np.array_equal(rows["image"][t], real[t]["image"]), f"image row {t}"
         assert np.array_equal(rows["mask"][t], real[t]["mask"]), f"mask row {t}"
         assert np.array_equal(rows["vector"][t], real[t]["vector"]), f"vector row {t}"
-    # Wrapper flags on the replayed rows agree with the builder's.
     assert real[1]["is_first"] is False and real[-1]["is_terminal"] is True
 
 
@@ -100,7 +89,7 @@ def test_snap_and_mutations_stay_valid():
         return all(check_tp_spacing(coords[:k], *coords[k])
                    for k in range(len(coords)))
 
-    assert pairwise_valid(state)  # snapped seed is prefix-valid
+    assert pairwise_valid(state)
 
     rng = np.random.RandomState(0)
     produced = 0
@@ -111,10 +100,8 @@ def test_snap_and_mutations_stay_valid():
         produced += 1
         assert len(trial) == n and len(set(trial)) == n
         assert all(0 <= i < real for i in trial)
-        # Full pairwise spacing => every prefix is valid => the env will
-        # never snap/penalize when the sequence is replayed.
-        assert pairwise_valid(trial)
-    assert produced > 100  # the generator actually yields mutations
+        assert pairwise_valid(trial)  # env will never snap/penalize on replay
+    assert produced > 100
 
 
 def test_spearman_manual_implementation():
@@ -122,7 +109,6 @@ def test_spearman_manual_implementation():
 
     assert spearman([1, 2, 3, 4, 5], [2, 4, 6, 8, 10]) == 1.0
     assert spearman([1, 2, 3, 4, 5], [10, 8, 6, 4, 2]) == -1.0
-    # Tied values get average ranks: a=[1.5,1.5,3.5,3.5] vs b=[1,2,3,4]
-    # => pearson = 4 / sqrt(4*5) = 0.8944...
+    # Ties get average ranks: [1.5,1.5,3.5,3.5] vs [1,2,3,4].
     assert np.isclose(spearman([1, 1, 2, 2], [1, 2, 3, 4]),
                       4 / np.sqrt(20.0))

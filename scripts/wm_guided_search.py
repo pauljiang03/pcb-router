@@ -1,39 +1,14 @@
 """World-model-guided placement search on the static canonical board.
 
-The trained DreamerV3 world model doubles as a millisecond-scale surrogate of
-the A* router: every observation component (64x64 render, candidate mask,
-geometry vector) is pure geometry -- routing only ever enters the episode
-through the terminal reward -- so the full (n+1)-row observation sequence for
-ANY candidate placement can be built without routing. Feeding those real
-observations through the posterior (dynamics.observe) and summing the reward
-head's predictions gives a predicted episode return in one batched forward.
+Observations are pure geometry (routing only enters the terminal reward), so
+a full episode for any placement can be built without routing and scored by
+the reward head in one batched forward. Phases: (1) fidelity, rank
+correlation between surrogate and true returns; (2) guided arm, route only
+the surrogate's top-k per iteration, counting router calls C; (3) blind arm,
+same generator/acceptance/seed, routing every mutation up to blind_mult x C.
+Output JSON is optimize_placement.py-compatible (train.py --demo_placement).
 
-Three phases:
-  1. fidelity   -- Spearman/Pearson between surrogate scores and true env
-                   returns on random mutations of the seed placement (depths
-                   1/2/4/8), plus rank correlation against the actual search
-                   objective (-max trace length) on the 0-failure subset.
-  2. guided arm -- hill-climb where each iteration scores --batch mutations
-                   with the surrogate and real-routes only the --topk best;
-                   router calls C are counted.
-  3. blind arm  -- identical mutation generator, acceptance, and seed, but
-                   every mutation is routed; runs to --blind_mult x C calls
-                   (wall-clock capped) so "blind needs >= k x C calls to
-                   match guided" is measurable, not asserted.
-
-Both arms search in ACTION-INDEX space (state = one candidate index per net)
-seeded from smart_placement snapped to the candidate grid; mutations mirror
-scripts/optimize_placement.py (swap / rotate-3 / move <=30mm with spacing
-check), acceptance is the same lexicographic rule, and max-milestones are
-gated on full serpentine equalization exactly the same way.
-
-The output JSON is schema-compatible with scripts/optimize_placement.py, so
-train.py --demo_placement can distill the result.
-
-Run (Colab): python scripts/wm_guided_search.py \
-    --checkpoint /path/to/latest.pt --configs defaults colab_a100 \
-    --device cuda:0 --minutes 10 --out wm_search.json
-Without --checkpoint the world model has RANDOM WEIGHTS: plumbing smoke only.
+Without --checkpoint the model has RANDOM weights: plumbing smoke only.
 """
 import argparse
 import json
@@ -48,8 +23,7 @@ import numpy as np
 from envs.board import check_tp_spacing, smart_placement
 from envs.routing import route_all_traces, equalize_lengths
 
-# Training router budget: same preset the env terminal step and the blind
-# optimizer score with, so all arms compare like with like.
+# Training router budget, same as the env terminal step and the blind optimizer.
 FAST = dict(n_starts=1, max_iters=12, repair_passes=1)
 
 
@@ -59,19 +33,10 @@ def _num_actions(env):
     return acts.n if hasattr(acts, "n") else acts.shape[0]
 
 
-# --------------------------------------------------------------- observation
-
 class ObsBuilder:
-    """Builds the exact (n+1)-row episode observation sequence the training
-    cache holds for a given action-index sequence, WITHOUT terminal routing.
-
-    Drives the inner env's geometry state directly (placed_tps /
-    current_trace / candidate_mask -- the only state the observation
-    functions read) and collects the same _render_obs/_mask/_vector rows the
-    wrapper emits post-step. State is snapshotted and restored around every
-    build, so the same env instance can also serve real replays. Parity with
-    the real env is pinned by tests/test_wm_search.py.
-    """
+    """Builds the exact episode observation rows the training cache holds for
+    an action-index sequence, without terminal routing. State is snapshotted
+    and restored around every build; parity is pinned by tests/test_wm_search.py."""
 
     def __init__(self, env):
         self._env = env
@@ -79,13 +44,11 @@ class ObsBuilder:
         inner = env._inner
         self._n = inner.num_traces
         self._num_actions = _num_actions(env)
-        # Row 0 (reset) is identical for every sequence on a static board.
         self._row0 = {k: np.asarray(obs0[k]) for k in ("image", "mask", "vector")}
         self._reset_state = (list(inner.placed_tps), inner.current_trace,
                              inner.candidate_mask.copy())
 
     def build(self, seq):
-        """Episode rows for one action-index sequence -> dict of (n+1, ...)"""
         assert len(seq) == self._n, (len(seq), self._n)
         env, inner = self._env, self._env._inner
         saved = (list(inner.placed_tps), inner.current_trace,
@@ -98,7 +61,7 @@ class ObsBuilder:
         masks = [self._row0["mask"]]
         vectors = [self._row0["vector"]]
         for idx in seq:
-            # Mirrors TPPlacementEnv.step minus reward/terminal routing.
+            # TPPlacementEnv.step minus reward/terminal routing.
             inner.placed_tps.append(tuple(inner.candidates[idx]))
             inner.current_trace += 1
             inner._update_candidate_mask()
@@ -107,8 +70,7 @@ class ObsBuilder:
             vectors.append(env._vector())
         inner.placed_tps, inner.current_trace, inner.candidate_mask = saved
         rows = self._n + 1
-        # Cache convention (dreamerv3.tools.add_to_cache): action[t] is the
-        # one-hot that PRODUCED obs row t; row 0 gets the zero filler.
+        # Cache convention: action[t] is the one-hot that produced obs row t.
         action = np.zeros((rows, self._num_actions), np.float32)
         for t, idx in enumerate(seq):
             action[t + 1, idx] = 1.0
@@ -131,9 +93,7 @@ class ObsBuilder:
 
 
 def surrogate_scores(wm, builder, states, device, chunk=64):
-    """Predicted episode returns for a list of index-sequences: posterior on
-    the built observations, reward head summed over all rows. One batched
-    forward per chunk; no imagination, no router."""
+    """Predicted episode returns: posterior on built obs, reward head summed."""
     import torch
     out = []
     for start in range(0, len(states), chunk):
@@ -145,15 +105,13 @@ def surrogate_scores(wm, builder, states, device, chunk=64):
             post, _ = wm.dynamics.observe(embed, obs["action"], obs["is_first"])
             feat = wm.dynamics.get_feat(post)
             pred = wm.heads["reward"](feat).mode()
-            # .mode() carries a trailing singleton dim -- fold it into the sum.
+            # .mode() carries a trailing singleton dim.
             out.append(pred.reshape(len(part), -1).sum(-1).cpu().numpy())
     return np.concatenate(out)
 
 
-# --------------------------------------------------------------- world model
-
 def load_world_model(env, checkpoint, configs, device, log_dir):
-    """Checkpoint-loading recipe mirroring eval.py:run_dreamer_policy."""
+    """Same loading recipe as eval.py:run_dreamer_policy."""
     import torch
     import ruamel.yaml as yaml
     from dreamerv3 import tools as dv3_tools
@@ -170,8 +128,7 @@ def load_world_model(env, checkpoint, configs, device, log_dir):
         print("CUDA not available, using CPU")
         device = "cpu"
     cfg["device"] = device
-    acts = env.action_space
-    cfg["num_actions"] = acts.n if hasattr(acts, "n") else acts.shape[0]
+    cfg["num_actions"] = _num_actions(env)
     config = argparse.Namespace(**cfg)
     logger = dv3_tools.Logger(pathlib.Path(log_dir), 0)
     agent = Dreamer(env.observation_space, env.action_space, config, logger,
@@ -190,13 +147,9 @@ def load_world_model(env, checkpoint, configs, device, log_dir):
     return agent._wm, device
 
 
-# -------------------------------------------------------------------- search
-
 def snap_to_indices(coords, cand, real_count):
-    """Greedy nearest-candidate snap of a coordinate placement onto the
-    action grid, keeping indices distinct and TP spacing valid (smart
-    placement coords are generally off-grid; the world model only ever saw
-    grid placements). Order-dependent but deterministic."""
+    """Nearest-candidate snap keeping indices distinct and spacing valid
+    (smart coords are off-grid; the model only saw grid placements)."""
     idxs = []
     for (x, y) in coords:
         d = np.hypot(cand[:real_count, 0] - x, cand[:real_count, 1] - y)
@@ -213,11 +166,8 @@ def snap_to_indices(coords, cand, real_count):
 
 
 def mutate_state(state, rng, cand, real_count):
-    """One random mutation in action-index space, mirroring
-    scripts/optimize_placement.py exactly: swap two nets' assignment (p=.35),
-    rotate three (p=.15), or move one TP to a candidate 0.1-30mm away that
-    keeps TP spacing. Returns the new state, or None when the drawn mutation
-    is inapplicable (caller redraws)."""
+    """One mutation in index space, mirroring optimize_placement.py:
+    swap two / rotate three / move one to a candidate 0.1-30mm away."""
     n = len(state)
     trial = list(state)
     r = rng.rand()
@@ -255,16 +205,14 @@ def coords_of(state, cand):
 
 
 def route_score(board, coords):
-    """(failures, max_mm, total_mm) at the training budget -- identical to
-    optimize_placement.py's score()."""
+    """(failures, max_mm, total_mm) at the training budget."""
     _p, lengths, fails = route_all_traces(board, coords, **FAST)
     fin = [x for x in lengths if x < 1e9]
     return int(fails), (max(fin) if fin else 1e9), (sum(fin) if fin else 1e9)
 
 
 def fully_matched(board, coords, n):
-    """Route + serpentine-equalize: True iff every trace reaches the padding
-    target (same gate as optimize_placement.py)."""
+    """True iff routed clean and every trace equalizes to the padding target."""
     paths, _L, fails = route_all_traces(board, coords, **FAST)
     if fails:
         return False
@@ -278,10 +226,7 @@ def _accept(trial_sc, best_sc):
     return f == 0 and (m < bm - 1e-6 or (m < bm + 1e-6 and t < bt - 0.5))
 
 
-# ------------------------------------------------------------------ metrics
-
 def _ranks(v):
-    """Average ranks (1-based) with ties; mergesort keeps it deterministic."""
     v = np.asarray(v, dtype=float)
     order = np.argsort(v, kind="mergesort")
     ranks = np.empty(len(v))
@@ -310,11 +255,8 @@ def spearman(a, b):
     return pearson(_ranks(a), _ranks(b))
 
 
-# ------------------------------------------------------------------- phases
-
 def replay_true_return(env, seq):
-    """True shaped episode return + routing outcome by stepping the REAL
-    wrapped env (the terminal step routes at the training budget)."""
+    """True shaped return + routing outcome by stepping the real wrapped env."""
     num_actions = _num_actions(env)
     env.reset()
     total, done, info = 0.0, False, {}
@@ -333,9 +275,7 @@ def replay_true_return(env, seq):
 
 
 def fidelity_phase(args, env, wm, builder, device, seed_state, cand, real_count):
-    """Surrogate honesty: rank correlation between predicted and true returns
-    on random mutations of the seed at depths 1/2/4/8 (deeper depths probe
-    the neighborhoods search actually visits later)."""
+    """Rank correlation between surrogate and true returns at depths 1/2/4/8."""
     rng = np.random.RandomState(args.seed)
     depths = (1, 2, 4, 8)
     samples = []
@@ -362,8 +302,7 @@ def fidelity_phase(args, env, wm, builder, device, seed_state, cand, real_count)
         "router_calls": len(samples),
         "samples": samples,
     }
-    # The search objective is (0 fails, min max): also report how well the
-    # surrogate ranks -max on the routable subset.
+    # Also rank against the search objective (-max) on the routable subset.
     ok = [s for s in samples if s["fails"] == 0]
     res["n_zero_fail"] = len(ok)
     if len(ok) >= 3:
@@ -381,8 +320,7 @@ def fidelity_phase(args, env, wm, builder, device, seed_state, cand, real_count)
 
 def guided_arm(args, wm, builder, device, board, cand, real_count,
                seed_state, seed_sc, seed_ok):
-    """Surrogate-guided hill climb: --batch mutations scored per iteration in
-    one forward, only the --topk best get a real router call."""
+    """Hill climb routing only the surrogate's top-k per iteration."""
     n = len(seed_state)
     rng = np.random.RandomState(args.seed + 1)
     best, bsc = list(seed_state), seed_sc
@@ -434,9 +372,7 @@ def guided_arm(args, wm, builder, device, board, cand, real_count,
 
 def blind_arm(args, board, cand, real_count, seed_state, seed_sc, seed_ok,
               call_cap, minutes_cap):
-    """Same generator, acceptance, and seed -- but every mutation is routed.
-    Runs past the guided arm's C (to call_cap) so the speedup headroom is
-    observed, not extrapolated."""
+    """Same generator/acceptance/seed; every mutation routed, up to call_cap."""
     n = len(seed_state)
     rng = np.random.RandomState(args.seed + 2)
     best, bsc = list(seed_state), seed_sc
@@ -472,14 +408,9 @@ def blind_arm(args, board, cand, real_count, seed_state, seed_sc, seed_ok,
     return best, bsc, best_matched, stats
 
 
-# --------------------------------------------------------------------- main
-
 def build_env(num_traces, seed):
-    """The exact training env: static canonical board, single_layer reward,
-    potential shaping, training router budget. reward_mode/shaping MUST match
-    the checkpoint's run or the reward head predicts a different quantity
-    (make_env's default reward_mode is layer_aware -- not what the static
-    canonical run used)."""
+    """reward_mode/shaping must match the checkpoint's run; make_env's default
+    reward_mode is layer_aware, NOT what the canonical run trained with."""
     from train import make_env
     return make_env("wm_search", 0, seed=seed, num_traces=num_traces,
                     reward_mode="single_layer", boards="canonical",
@@ -490,7 +421,7 @@ def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--checkpoint", default=None,
-                    help="latest.pt from the static canonical run; OMIT for a "
+                    help="latest.pt from the static canonical run; omit for a "
                          "random-weights plumbing smoke test")
     ap.add_argument("--configs", nargs="+", default=["defaults", "colab_a100"],
                     help="configs.yaml sections (must match the checkpoint)")
@@ -502,8 +433,7 @@ def main():
     ap.add_argument("--topk", type=int, default=2,
                     help="real router calls per iteration")
     ap.add_argument("--fidelity", type=int, default=32,
-                    help="mutation samples for the fidelity measurement "
-                         "(0 skips the phase)")
+                    help="fidelity samples (0 skips the phase)")
     ap.add_argument("--blind_mult", type=float, default=3.0,
                     help="blind arm runs to blind_mult x guided router calls")
     ap.add_argument("--blind_minutes", type=float, default=None,
@@ -517,7 +447,7 @@ def main():
     out.parent.mkdir(parents=True, exist_ok=True)
 
     env = build_env(args.num_traces, args.seed)
-    builder = ObsBuilder(env)  # resets once; canonical board is static
+    builder = ObsBuilder(env)
     inner = env._inner
     board, cand, real_count = inner.board, inner.candidates, inner._real_count
     n = inner.num_traces
@@ -527,7 +457,6 @@ def main():
     wm, device = load_world_model(env, args.checkpoint, args.configs,
                                   args.device, out.parent / "wm_search_logs")
 
-    # Seed: smart_placement snapped onto the candidate grid (index space).
     seed_state = snap_to_indices(smart_placement(board, n), cand, real_count)
     seed_sc = route_score(board, coords_of(seed_state, cand))
     seed_ok = fully_matched(board, coords_of(seed_state, cand), n)
@@ -550,19 +479,17 @@ def main():
         args, board, cand, real_count, seed_state, seed_sc, seed_ok,
         call_cap, blind_minutes)
 
-    # Equal-call comparison + calls blind needed to match guided's final max.
     C = g_stats["router_calls"]
     blind_at_C = next((row for row in reversed(b_stats["curve"])
                        if row[0] <= C), b_stats["curve"][0])
-    # First blind call count whose best max reaches guided's final max; 0
-    # means the shared seed already matched (guided only improved the total).
+    # 0 = the shared seed already matched guided's final max.
     match_calls = next((row[0] for row in b_stats["curve"]
                         if row[1] < g_sc[1] + 1e-6), None)
     b_stats["best_at_equal_calls_max_mm"] = blind_at_C[1]
     b_stats["best_at_equal_calls_total_mm"] = blind_at_C[2]
     b_stats["calls_to_match_guided"] = match_calls
 
-    # Final answer must equalize (same fallback as optimize_placement.py).
+    # Saved answer must equalize (same fallback as optimize_placement.py).
     final, final_sc = g_best, g_sc
     if not fully_matched(board, coords_of(final, cand), n):
         if g_matched is not None:
@@ -573,7 +500,7 @@ def main():
             print("WARNING: no fully-matched guided placement; saving the "
                   "best routed one anyway")
 
-    # Verify at the quality budget eval.py scores with, incl. equalization.
+    # Quality-budget verify, same as eval.py scoring.
     coords = coords_of(final, cand)
     paths, lengths, fails = route_all_traces(board, coords)
     fin = [x for x in lengths if x < 1e9]
