@@ -187,6 +187,24 @@ def test_repair_placement_time_budget():
     assert time.monotonic() - t0 < 5.0      # and no routing performed
 
 
+def test_demo_collection_with_explicit_placement(tmp_path):
+    from demos import collect_demos
+    from train import make_env
+    from envs.board import smart_placement
+
+    def env_fn(offset):
+        return make_env("demo", 0, seed=700 + offset, num_traces=4,
+                        reward_mode="single_layer", boards="central")
+
+    placement = [list(p) for p in smart_placement(env_fn(0)._inner.board, 4)]
+    made = collect_demos(tmp_path, env_fn, 1, verbose=False,
+                         placement=placement)
+    assert made == 1
+    from dreamerv3 import tools
+    ep = next(iter(tools.load_episodes(tmp_path).values()))
+    assert len(ep["reward"]) == 5 and (ep["action"][1:].sum(axis=1) == 1).all()
+
+
 def test_expert_action_maps_to_valid_candidates():
     from demos import _expert_action
     env = TPPlacementEnv(num_traces=4, seed=3)

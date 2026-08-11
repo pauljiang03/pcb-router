@@ -188,6 +188,10 @@ def main():
                              "Hard 20-trace boards cost ~30s each serially.")
     parser.add_argument("--steps", type=float, default=None,
                         help="Total env steps (overrides config steps).")
+    parser.add_argument("--demo_placement", type=str, default=None,
+                        help="JSON from scripts/optimize_placement.py; demo "
+                             "episodes replay THIS placement instead of "
+                             "smart_placement (expert-iteration distillation).")
     args = parser.parse_args()
 
     config_path = pathlib.Path(__file__).parent / "configs.yaml"
@@ -279,10 +283,17 @@ def main():
                             args.num_traces, args.reward_mode,
                             boards=args.boards, shaping=args.shaping)
 
+        demo_placement = None
+        if args.demo_placement:
+            import json
+            demo_placement = json.load(
+                open(args.demo_placement))["placement"]
+            print(f"Demo placement from {args.demo_placement} "
+                  f"({len(demo_placement)} TPs)")
         demo_workers = args.demo_workers or max(
             1, min(8, (os.cpu_count() or 2) - 2))
         collect_demos(demodir, demo_env_fn, demo_episodes,
-                      workers=demo_workers)
+                      workers=demo_workers, placement=demo_placement)
         demo_eps = tools.load_episodes(demodir)
 
     state = None

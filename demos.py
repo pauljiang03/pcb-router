@@ -79,8 +79,13 @@ def _expert_action(inner, target):
     return int(pool[int(np.argmin(d))])
 
 
-def _collect_range(directory, env_fn, start_offset, count, verbose=True):
-    """Roll `count` expert episodes at seed offsets [start_offset, +count)."""
+def _collect_range(directory, env_fn, start_offset, count, verbose=True,
+                   placement=None):
+    """Roll `count` expert episodes at seed offsets [start_offset, +count).
+
+    placement: optional explicit TP list (e.g. from
+    scripts/optimize_placement.py) replayed as the expert instead of
+    smart_placement -- the distillation path of expert iteration."""
     directory = pathlib.Path(directory)
     env = env_fn(start_offset)  # env's board seed advances once per reset
     num_actions = env.action_space.shape[0]
@@ -95,7 +100,8 @@ def _collect_range(directory, env_fn, start_offset, count, verbose=True):
         first["discount"] = 1.0
         add_to_cache(cache, env.id, first)
 
-        plan = _expert_plan(inner)
+        plan = ([tuple(p) for p in placement] if placement is not None
+                else _expert_plan(inner))
         done, step_i, ep_return = False, 0, 0.0
         while not done:
             target = plan[step_i] if step_i < len(plan) else None
@@ -128,7 +134,8 @@ def _collect_range(directory, env_fn, start_offset, count, verbose=True):
     return count
 
 
-def collect_demos(directory, env_fn, episodes, verbose=True, workers=1):
+def collect_demos(directory, env_fn, episodes, verbose=True, workers=1,
+                  placement=None):
     """Ensure `episodes` expert episodes exist in `directory`.
 
     env_fn(seed_offset) -> a train.make_env-style wrapped env (OneHotAction ->
@@ -157,7 +164,8 @@ def collect_demos(directory, env_fn, episodes, verbose=True, workers=1):
               f"{workers} worker{'s' if workers > 1 else ''})...")
 
     if workers == 1:
-        return _collect_range(directory, env_fn, existing, todo, verbose)
+        return _collect_range(directory, env_fn, existing, todo, verbose,
+                              placement)
 
     ctx = mp.get_context("fork")  # children only run numpy/env code, no torch
     sizes = [todo // workers + (1 if i < todo % workers else 0)
@@ -168,7 +176,7 @@ def collect_demos(directory, env_fn, episodes, verbose=True, workers=1):
             continue
         procs.append(ctx.Process(
             target=_collect_range,
-            args=(directory, env_fn, existing + lo, n, False)))
+            args=(directory, env_fn, existing + lo, n, False, placement)))
         procs[-1].start()
         lo += n
     # Workers are silent; the parent reports GLOBAL progress (a single

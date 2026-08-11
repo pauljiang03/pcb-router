@@ -13,7 +13,8 @@ os.environ["MUJOCO_GL"] = "osmesa"
 import numpy as np
 
 from envs.board import load_te_example, generate_candidate_grid, check_tp_spacing
-from envs.routing import route_all_traces, validate_routing_constraints
+from envs.routing import (route_all_traces, validate_routing_constraints,
+                          equalize_lengths)
 # matplotlib / torch / dreamerv3 are imported lazily so the numeric A* eval runs without them.
 
 
@@ -55,6 +56,20 @@ def evaluate_placement(board, placed_tps, use_freerouting=False, route_kw=None):
     finite = [l for l in lengths if l < float('inf')]
     spread = ((max(finite) - min(finite)) / np.mean(finite)
               if len(finite) > 1 else 0)
+    # The fixture serpentine-pads every trace to the max (final wire =
+    # n * max); run that post-stage on fully-routed placements and report
+    # whether it succeeds. Raw routed spread above is only the feasibility
+    # margin -- eq_spread is the as-built number.
+    eq_paths, matched, eq_spread = None, 0, None
+    if failures == 0 and finite:
+        try:
+            eq_paths, eq_lengths, _target, matched = equalize_lengths(
+                board, paths, test_points=placed_tps)
+            eqfin = [x for x in eq_lengths if x < 1e9]
+            if len(eqfin) > 1:
+                eq_spread = (max(eqfin) - min(eqfin)) / np.mean(eqfin)
+        except Exception:
+            eq_paths = None
     result = {
         "placed": placed_tps, "paths": paths, "lengths": lengths,
         "failures": failures,
@@ -63,6 +78,7 @@ def evaluate_placement(board, placed_tps, use_freerouting=False, route_kw=None):
         "max_length": max(finite) if finite else 0,
         "spread": spread,
         "validation": validation,
+        "eq_paths": eq_paths, "matched": matched, "eq_spread": eq_spread,
     }
     _route_cache[key] = result
     return result
@@ -329,17 +345,27 @@ def main():
             v = r["validation"]
             t2t = (f"{v['trace_to_trace_min']:.2f}"
                    if v['trace_to_trace_min'] < float('inf') else "n/a")
+            eq_note = ""
+            if r["failures"] == 0:
+                n_tr = len(r["lengths"])
+                eq_note = (f", matched={r['matched']}/{n_tr}"
+                           + (f", eq_spread={r['eq_spread']:.3f}"
+                              if r["eq_spread"] is not None else ""))
             print(f"  Ep {i + 1}: failures={r['failures']}, "
                   f"crossings={v.get('crossings', 0)}, "
                   f"length={r['total_length']:.0f}mm, "
                   f"max={r['max_length']:.0f}mm, "
-                  f"spread={r['spread']:.2f}, t2t={t2t}mm, "
+                  f"spread={r['spread']:.2f}{eq_note}, t2t={t2t}mm, "
                   f"pad_clr={v.get('tp_to_trace_min', float('inf')):.1f}mm")
             if plot_board is not None:
-                plot_board(boards[i][0], test_points=r["placed"], paths=r["paths"],
+                # Render the AS-BUILT board: equalized serpentine paths when
+                # the placement routed clean, raw routed paths otherwise.
+                show = r["eq_paths"] if r.get("eq_paths") else r["paths"]
+                eq_tag = " (equalized)" if r.get("eq_paths") else ""
+                plot_board(boards[i][0], test_points=r["placed"], paths=show,
                            candidates=boards[i][1],
-                           title=f"{name} #{i + 1}: {r['failures']} fail, "
-                                 f"{r['total_length']:.0f}mm",
+                           title=f"{name} #{i + 1}{eq_tag}: {r['failures']} "
+                                 f"fail, max {r['max_length']:.0f}mm",
                            filename=str(outdir / f"{name.lower()}_{i + 1}.png"))
 
     def timed(name, runner):
@@ -386,11 +412,14 @@ def main():
         valid = sum(1 for r in results
                     if r["failures"] == 0
                     and r.get("validation", {}).get("all_valid", False))
+        n_tr = max((len(r["lengths"]) for r in results), default=0)
+        matched = [r.get("matched", 0) for r in results]
         print(f"  {name:>10s}: failures={np.mean(fails):.1f}+/-{np.std(fails):.1f}, "
               f"crossings={np.mean(crossings):.1f}, "
               f"length={np.mean(lengths):.0f}mm, "
               f"max={np.mean(maxes):.0f}mm, "
               f"spread={np.mean(spreads):.2f}, "
+              f"matched={np.mean(matched):.1f}/{n_tr}, "
               f"valid={valid}/{len(results)}")
 
     if plot_board is not None:
